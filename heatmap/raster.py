@@ -11,6 +11,7 @@ from scipy.ndimage import gaussian_filter
 
 from heatmap.config import MAX_GRID_DIMENSION
 from heatmap.constants import EARTH_RADIUS_KM
+from heatmap.format import pace_min_per_km
 
 if TYPE_CHECKING:
     from heatmap.config import Config
@@ -347,7 +348,10 @@ def _normalize_speed(
         gaussian_filter(norm * weight, sigma=sigma) / np.maximum(blurred_weight, 1e-9),
         0,
     )
-    log.info("Pace range: %.2f–%.2f m/s  ≈ %d–%d sec/km", s_lo, s_hi, 1000 / s_hi, 1000 / s_lo)
+    log.info(
+        "Pace range: %.2f–%.2f m/s  ≈ %s – %s",
+        s_lo, s_hi, pace_min_per_km(s_hi), pace_min_per_km(s_lo),
+    )
     return norm, (s_lo, s_hi)
 
 
@@ -362,6 +366,18 @@ def _normalize_hr(
     if not visited.size:
         log.info("HR: no heart rate data")
         return np.zeros_like(mean), (100.0, 180.0)
+
+    # The layer shows MEAN HR per pixel. The auto-range uses pixel means.
+    # A single hard effort gets averaged out by many easier visits to the same
+    # pixel, so the visual max ≪ your actual peak HR. Print raw distribution
+    # too so you can manually set hr_max_bpm if you want a different range.
+    raw_hr = (hr_sum[hr_n > 0] / hr_n[hr_n > 0]).astype(float)
+    log.info(
+        "HR per-pixel means: p50=%.0f  p95=%.0f  p99=%.0f  max=%.0f bpm  "
+        "(higher peaks exist in raw samples but get averaged out per pixel)",
+        np.percentile(raw_hr, 50), np.percentile(raw_hr, 95),
+        np.percentile(raw_hr, 99), raw_hr.max(),
+    )
 
     auto_lo, auto_hi = _autorange(visited, pct)
     h_lo = lo if lo is not None else auto_lo

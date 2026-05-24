@@ -12,6 +12,7 @@ dependencies = [
     "pillow",
     "matplotlib",
     "gpxpy>=1.6.2",
+    "tqdm>=4.67.3",
 ]
 
 [dependency-groups]

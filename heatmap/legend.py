@@ -8,6 +8,7 @@ from heatmap.colormaps import CMAP_COUNT
 from heatmap.colormaps import CMAP_ELEV
 from heatmap.colormaps import CMAP_HR
 from heatmap.colormaps import CMAP_SPEED
+from heatmap.format import pace_min_per_km
 
 if TYPE_CHECKING:
     import matplotlib.colors as mcolors
@@ -22,11 +23,6 @@ def _cmap_to_css(cmap: mcolors.LinearSegmentedColormap, n: int = 14) -> str:
         r, g, b, a = cmap(t)
         stops.append(f"rgba({int(r * 255)},{int(g * 255)},{int(b * 255)},{a:.2f})")
     return f"linear-gradient(to right, {', '.join(stops)})"
-
-
-def _pace_str(ms: float) -> str:
-    secs = 1000 / ms
-    return f"{int(secs // 60)}:{int(secs % 60):02d}/km"
 
 
 def _row(row_id: str, title: str, grad_css: str, label_lo: str, label_hi: str, visible: bool = False) -> str:  # noqa: FBT001, FBT002, PLR0913
@@ -65,7 +61,7 @@ def build_legend_html(layers: NormalizedLayers) -> str:
 ">
   {_row("legend-frequency", "Frequency (linear)", freq_css, "1 pass", f"{count_max} passes", visible=True)}
   {_row("legend-frequency-log", "Frequency (log)", freq_css, "1 pass", f"{count_max} passes (log scale)")}
-  {_row("legend-pace-avg", "Pace (average)", pace_css, _pace_str(s_lo), _pace_str(s_hi))}
+  {_row("legend-pace-avg", "Pace (average)", pace_css, pace_min_per_km(s_lo), pace_min_per_km(s_hi))}
   {_row("legend-heart-rate-avg", "Heart rate (average)", hr_css, f"{hr_lo:.0f} bpm", f"{hr_hi:.0f} bpm")}
   {
         _row(

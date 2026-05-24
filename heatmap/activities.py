@@ -7,6 +7,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 import pandas as pd
+from tqdm import tqdm
 
 from heatmap.constants import EARTH_RADIUS_KM
 from heatmap.localization import normalize
@@ -86,7 +87,7 @@ def _resolve_gps_starts(runs: pd.DataFrame, activities_dir: Path) -> pd.DataFram
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
 
     rows = []
-    for _, row in runs.iterrows():
+    for _, row in tqdm(runs.iterrows(), total=len(runs), desc="GPS start points", unit="run"):
         fn = str(row["Filename"])
         cached = cache.get(fn)
         # Retry entries that previously failed (lat is None) — old parser may
