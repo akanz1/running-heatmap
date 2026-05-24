@@ -10,6 +10,7 @@ from heatmap.activities import load_and_filter
 from heatmap.config import Config
 from heatmap.constants import EARTH_RADIUS_KM
 from heatmap.render import build_and_save
+from heatmap.sources import intervals_icu
 from heatmap.tiles import build_pyramid
 from heatmap.tiles import load_pyramid_metadata
 from heatmap.tracks import load_tracks
@@ -18,7 +19,33 @@ warnings.filterwarnings("ignore")
 
 log = logging.getLogger(__name__)
 
-__all__ = ["Config", "configure_logging", "run"]
+__all__ = ["Config", "configure_logging", "run", "sync_intervals_icu"]
+
+
+def sync_intervals_icu(config: Config) -> int:
+    """Sync intervals.icu activities into the local cache.
+
+    Skipped (returns 0) if `config.sync_enabled` is False, `HEATMAP_SKIP_SYNC=1`,
+    or `INTERVALS_ICU_API_KEY` is unset.
+    """
+    if not config.sync_enabled:
+        log.info("config.sync_enabled=False — skipping intervals.icu sync")
+        return 0
+    if os.environ.get("HEATMAP_SKIP_SYNC"):
+        log.info("HEATMAP_SKIP_SYNC set — skipping intervals.icu sync")
+        return 0
+
+    api_key = os.environ.get("INTERVALS_ICU_API_KEY")
+    athlete_id = os.environ.get("INTERVALS_ICU_ATHLETE_ID")
+    if not api_key or not athlete_id:
+        log.info("INTERVALS_ICU_API_KEY/ATHLETE_ID unset — skipping intervals.icu sync")
+        return 0
+
+    return intervals_icu.sync(
+        config.resolved_intervals_icu_cache_dir(),
+        athlete_id=athlete_id,
+        api_key=api_key,
+    )
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -74,12 +101,14 @@ def run(config: Config) -> str:
         pyramid = load_pyramid_metadata(config.output_dir() / "tiles")
         return build_and_save(pyramid, config)
 
-    runs, home_lat, home_lon, activities_dir = load_and_filter(config)
+    sync_intervals_icu(config)
+
+    runs, home_lat, home_lon = load_and_filter(config)
     if runs.empty:
         msg = "No activities after filtering — check config filters."
         raise ValueError(msg)
 
-    tracks = load_tracks(runs, activities_dir, config.track_cache_path())
+    tracks = load_tracks(runs, config.track_cache_path())
     if not tracks:
         msg_0 = "No tracks loaded — check activity_types and date filters."
         raise ValueError(msg_0)

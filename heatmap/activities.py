@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-import json
 import logging
 import math
 from datetime import date
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from tqdm import tqdm
 
 from heatmap.constants import EARTH_RADIUS_KM
-from heatmap.localization import normalize
-from heatmap.parsers import parse_track
+from heatmap.sources import intervals_icu
+from heatmap.sources import strava_export
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from heatmap.config import Config
 
 log = logging.getLogger(__name__)
@@ -26,25 +22,6 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
-
-
-def _get_gps_start(filepath: Path) -> tuple[float | None, float | None, float | None]:
-    """Return (start_lat, start_lon, spread_m) from any supported track format.
-
-    Returns (None, None, None) if the file can't be parsed or has no GPS points.
-    """
-    points = parse_track(filepath)
-    if not points:
-        return None, None, None
-
-    lats = [p[0] for p in points]
-    lons = [p[1] for p in points]
-    mid_lat = (min(lats) + max(lats)) / 2
-    spread_m = max(
-        (max(lats) - min(lats)) * 111_000,
-        (max(lons) - min(lons)) * 111_000 * math.cos(math.radians(mid_lat)),
-    )
-    return lats[0], lons[0], spread_m
 
 
 def _detect_home(runs: pd.DataFrame) -> tuple[float, float, int]:
@@ -61,48 +38,74 @@ def _detect_home(runs: pd.DataFrame) -> tuple[float, float, int]:
     return home_lat, home_lon, len(cell_lats[best])
 
 
-def _load_csv(activities_dir: Path) -> pd.DataFrame:
-    df = pd.read_csv(activities_dir / "activities.csv")
-    df = normalize(df)
-    df["Activity Date"] = pd.to_datetime(df["Activity Date"], format="mixed", dayfirst=True)
-    return df
+def _dedup_key(day: pd.Timestamp, lat: float, lon: float, dist_bucket: int) -> str:
+    return f"{day.date()}_{round(lat, 3)}_{round(lon, 3)}_{dist_bucket}"
+
+
+def _merge(df_strava: pd.DataFrame, df_icu: pd.DataFrame) -> pd.DataFrame:
+    """Concat strava + intervals. Drop intervals rows whose activity is
+    already in strava_export.
+
+    Match key: (day, start_lat, start_lon, distance_bucket).
+    - coords rounded to 3 dp (~100 m grid)
+    - distance bucketed to 100 m, with ±1 bucket tolerance for boundary
+      cases where two platforms report distances straddling a bucket edge
+    - ±1 day tolerance — Strava's date is UTC, intervals' is local with
+      unknown TZ, so runs near midnight UTC fall on different days
+
+    Within-source duplicates are preserved (running the same route every
+    day in Strava is 365 distinct activities, not one).
+    """
+    if df_icu.empty:
+        return df_strava.reset_index(drop=True)
+
+    strava_keys: set[str] = set()
+    for r in df_strava.itertuples(index=False):
+        if pd.isna(r.start_lat) or pd.isna(r.distance_m):
+            continue
+        day = r.date.floor("D")
+        bucket = round(r.distance_m / 100)
+        # Pre-expand by ±2 buckets (~±200 m) — same activity often differs by
+        # >100 m between platforms (different start/stop/pause trimming).
+        for b_off in (-2, -1, 0, 1, 2):
+            strava_keys.add(_dedup_key(day, r.start_lat, r.start_lon, bucket + b_off))
+
+    keep_mask = []
+    for r in df_icu.itertuples(index=False):
+        if pd.isna(r.start_lat) or pd.isna(r.distance_m):
+            keep_mask.append(True)
+            continue
+        base = r.date.floor("D")
+        bucket = round(r.distance_m / 100)
+        hit = any(
+            _dedup_key(base + pd.Timedelta(days=d_off), r.start_lat, r.start_lon, bucket)
+            in strava_keys
+            for d_off in (-1, 0, 1)
+        )
+        keep_mask.append(not hit)
+
+    n_drop = sum(1 for k in keep_mask if not k)
+    if n_drop:
+        log.info("Dedup: dropped %d intervals.icu duplicates (already in strava_export)", n_drop)
+    return pd.concat([df_strava, df_icu[keep_mask]], ignore_index=True)
 
 
 def _filter_by_type_and_date(
     df: pd.DataFrame, activity_types: list[str], date_from: str | None, date_to: str | None
 ) -> pd.DataFrame:
-    runs = df[df["Activity Type"].isin(activity_types)].copy()
-    log.info("Total matching activities in export: %d", len(runs))
+    runs = df[df["type"].isin(activity_types)].copy()
+    log.info("Total matching activities: %d", len(runs))
 
-    d_from = pd.Timestamp(date_from) if date_from else pd.Timestamp.min
-    d_to = pd.Timestamp(date_to) if date_to else pd.Timestamp(date.today())
-    runs = runs[runs["Activity Date"].between(d_from, d_to)].copy()
-    log.info("After date filter (%s - %s): %d", d_from.date(), d_to.date(), len(runs))
+    d_from = date.fromisoformat(date_from) if date_from else date.min
+    d_to = date.fromisoformat(date_to) if date_to else date.today()
+    # Compare on calendar day so date_to="2026-05-24" includes activities
+    # later that day, not just those starting at 00:00.
+    runs = runs[runs["date"].dt.date.between(d_from, d_to)].copy()
+    log.info("After date filter (%s - %s): %d", d_from, d_to, len(runs))
     return runs
 
 
-def _resolve_gps_starts(runs: pd.DataFrame, activities_dir: Path) -> pd.DataFrame:
-    """Augment each row with start_lat / start_lon / gps_spread_m. Disk-cached per export."""
-    cache_path = activities_dir / "_gps_cache.json"
-    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
-
-    rows = []
-    for _, row in tqdm(runs.iterrows(), total=len(runs), desc="GPS start points", unit="run"):
-        fn = str(row["Filename"])
-        cached = cache.get(fn)
-        # Retry entries that previously failed (lat is None) — old parser may
-        # have lacked support for this file's format.
-        if cached is None or cached[0] is None:
-            cache[fn] = list(_get_gps_start(activities_dir / fn))
-        lat, lon, spread = cache[fn]
-        rows.append({**row, "start_lat": lat, "start_lon": lon, "gps_spread_m": spread})
-
-    cache_path.write_text(json.dumps(cache))
-    return pd.DataFrame(rows)
-
-
 def _resolve_home(runs: pd.DataFrame, config: Config) -> tuple[float | None, float | None]:
-    """Return (home_lat, home_lon) or (None, None) if no home is needed."""
     if config.home_lat is not None and config.home_lon is not None:
         log.info("Using manual home: %s, %s", config.home_lat, config.home_lon)
         return config.home_lat, config.home_lon
@@ -132,18 +135,23 @@ def _filter_by_home_radius(runs: pd.DataFrame, home_lat: float, home_lon: float,
     return filtered
 
 
-def load_and_filter(config: Config) -> tuple[pd.DataFrame, float | None, float | None, Path]:
-    """Load activities CSV, filter by type/date/home radius.
+def load_and_filter(config: Config) -> tuple[pd.DataFrame, float | None, float | None]:
+    """Load + merge all activity sources, filter by user config.
 
-    Returns (filtered_runs, home_lat, home_lon, activities_dir).
+    Returns (filtered_runs, home_lat, home_lon).
     home_lat / home_lon are None in worldwide mode.
     """
-    activities_dir = config.resolved_activities_dir()
-    log.info("Source: %s", activities_dir)
+    strava_dir = config.resolved_activities_dir()
+    log.info("Source: strava_export at %s", strava_dir)
+    df_strava = strava_export.load(strava_dir)
 
-    df = _load_csv(activities_dir)
+    icu_dir = config.resolved_intervals_icu_cache_dir()
+    df_icu = intervals_icu.load(icu_dir)
+    if not df_icu.empty:
+        log.info("Source: intervals.icu cache at %s", icu_dir)
+
+    df = _merge(df_strava, df_icu)
     runs = _filter_by_type_and_date(df, config.activity_types, config.date_from, config.date_to)
-    runs = _resolve_gps_starts(runs, activities_dir)
 
     runs = runs[runs["start_lat"].notna() & (runs["gps_spread_m"] >= config.gps_spread_min_m)].copy()
     log.info("After removing no-GPS / indoor: %d", len(runs))
@@ -153,4 +161,4 @@ def load_and_filter(config: Config) -> tuple[pd.DataFrame, float | None, float |
     if config.radius_km is not None and home_lat is not None and home_lon is not None:
         runs = _filter_by_home_radius(runs, home_lat, home_lon, config.radius_km)
 
-    return runs, home_lat, home_lon, activities_dir
+    return runs, home_lat, home_lon

@@ -10,6 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ACTIVITIES_DIR = PROJECT_ROOT / "strava_export"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "cache"
+DEFAULT_INTERVALS_ICU_CACHE_DIR = DEFAULT_CACHE_DIR / "intervals_icu"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
@@ -44,6 +45,14 @@ class Config:
     # --- Activity selection -------------------------------------------------
     # Path to your unzipped Strava export. None = <project_root>/strava_export.
     activities_dir: str | None = None
+
+    # Local cache for activities synced from intervals.icu.
+    # None = <project_root>/cache/intervals_icu/.
+    intervals_icu_cache_dir: str | None = None
+
+    # If False, skip the intervals.icu sync step (offline / CI runs).
+    # The sync is also skipped when INTERVALS_ICU_API_KEY is unset.
+    sync_enabled: bool = True
 
     # Which activity types to include. Use the ActivityType enum or raw strings.
     activity_types: list[str] = field(default_factory=lambda: [ActivityType.RUN])
@@ -118,6 +127,13 @@ class Config:
             msg = f"activities.csv not found in {path}. Set activities_dir in Config to override the default."
             raise FileNotFoundError(msg)
         return path
+
+    def resolved_intervals_icu_cache_dir(self) -> Path:
+        return (
+            Path(self.intervals_icu_cache_dir)
+            if self.intervals_icu_cache_dir
+            else DEFAULT_INTERVALS_ICU_CACHE_DIR
+        )
 
     def track_cache_path(self) -> Path:
         return DEFAULT_CACHE_DIR / "track_cache.json"

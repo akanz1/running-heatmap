@@ -1,9 +1,13 @@
 import logging
 
+from dotenv import load_dotenv
+
 from heatmap import configure_logging
 from heatmap import run
 from heatmap.config import ActivityType
 from heatmap.config import Config
+
+load_dotenv()
 
 config = Config(
     # Path to your unzipped Strava export folder.

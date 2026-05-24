@@ -30,10 +30,24 @@ def _is_pre_speed_xml(fn: str, pts: list[list]) -> bool:
     return all(p[2] is None for p in pts)
 
 
+def _migrate_cache_keys(cache: dict) -> dict:
+    """Rename legacy keys like 'activities/<id>.gpx.gz' → '<id>.gpx.gz'.
+
+    Cache is now keyed by file basename so it works across multiple sources
+    without storing absolute paths.
+    """
+    renamed = {}
+    for k, v in cache.items():
+        new_k = k.split("/")[-1] if "/" in k else k
+        renamed[new_k] = v
+    return renamed
+
+
 def _load_cache(cache_path: Path) -> dict:
     if not cache_path.exists():
         return {}
     cache = json.loads(cache_path.read_text())
+    cache = _migrate_cache_keys(cache)
 
     stale_fields = [k for k, v in cache.items() if v and len(v[0]) < TRACK_POINT_FIELDS]
     if stale_fields:
@@ -52,10 +66,12 @@ def _load_cache(cache_path: Path) -> dict:
 
 def load_tracks(
     runs: pd.DataFrame,
-    activities_dir: Path,
     cache_path: Path,
 ) -> list[tuple[str, list[list]]]:
     """Parse track files (FIT / GPX / TCX) with disk caching.
+
+    Reads each row's absolute `file_path`. Cache is keyed by file basename
+    so the same cache works for strava_export + intervals.icu sources.
 
     Returns list of (label, [[lat, lon, speed, hr, alt], ...]).
     """
@@ -64,14 +80,15 @@ def load_tracks(
 
     tracks: list[tuple[str, list[list]]] = []
     for _, row in tqdm(runs.iterrows(), total=len(runs), desc="Loading tracks", unit="run"):
-        fn = str(row["Filename"])
-        label = f"{row['Activity Date'].date()} {row['Activity Name']}"
+        fp = row["file_path"]
+        key = fp.name
+        label = f"{row['date'].date()} {row['name']}"
 
-        if fn not in cache:
-            cache[fn] = parse_track(activities_dir / fn)
+        if key not in cache:
+            cache[key] = parse_track(fp)
 
-        if cache[fn]:
-            tracks.append((label, cache[fn]))
+        if cache[key]:
+            tracks.append((label, cache[key]))
 
     cache_path.write_text(json.dumps(cache))
 

@@ -1,7 +1,7 @@
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
 
-.PHONY: setup update run run-html-only serve lint format clean
+.PHONY: setup update sync run run-html-only serve lint format clean
 
 ## Create venv and install all dependencies
 setup:
@@ -10,6 +10,11 @@ setup:
 ## Upgrade all dependencies to latest compatible versions
 update:
 	uv sync --upgrade
+
+## Sync new intervals.icu activities into cache/intervals_icu/.
+## No-op if INTERVALS_ICU_API_KEY is unset.
+sync:
+	uv run python -c "from dotenv import load_dotenv; load_dotenv(); from heatmap import configure_logging, sync_intervals_icu; from main import config; configure_logging(); sync_intervals_icu(config)"
 
 ## Generate the heatmap HTML + tile pyramid
 run:

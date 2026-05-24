@@ -29,11 +29,24 @@ make setup
 |---|---|
 | `make setup` | Create `.venv/` and install deps |
 | `make update` | Upgrade all deps to latest versions |
-| `make run` | Generate `outputs/heatmap.html` + tile pyramid |
+| `make sync` | Sync new intervals.icu activities into `cache/intervals_icu/` (no-op without an API key) |
+| `make run` | Generate `outputs/heatmap.html` + tile pyramid (runs `sync` first) |
 | `make serve` | Serve `outputs/` on `http://localhost:8000` |
 | `make lint` | Run `ruff check` |
 | `make format` | Run `ruff check --fix` + `ruff format` |
 | `make clean` | Delete the venv |
+
+### Optional: intervals.icu sync
+
+Fills gaps in your Strava export with activities only on [intervals.icu](https://intervals.icu) (e.g. Garmin uploads that never went to Strava). Skip if you don't need it — the pipeline works fine from `strava_export/` alone.
+
+1. Copy `.env.example` to `.env`.
+2. Set `INTERVALS_ICU_API_KEY` and `INTERVALS_ICU_ATHLETE_ID` from <https://intervals.icu/settings> (Developer section).
+3. `make sync` to populate `cache/intervals_icu/`, or `make run` to sync + render in one step.
+
+Strava-sourced activities on intervals are skipped automatically (their files aren't served by the API). Across-source duplicates are deduped on `(day, start coords, distance)`.
+
+`HEATMAP_SKIP_SYNC=1 make run` or `Config(sync_enabled=False)` disables the sync step for offline / CI runs.
 
 ## Usage
 

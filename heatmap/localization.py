@@ -16,20 +16,28 @@ if TYPE_CHECKING:
 # Add new locale entries here as needed.
 COLUMN_ALIASES: dict[str, str] = {
     # German
+    "Aktivitäts-ID": "Activity ID",
     "Aktivitätsdatum": "Activity Date",
     "Name der Aktivität": "Activity Name",
     "Aktivitätsart": "Activity Type",
     "Dateiname": "Filename",
+    "Bewegungszeit": "Moving Time",
+    "Distanz.1": "Distance",
+    "Höhenzunahme": "Elevation Gain",
     # English passes through unchanged but listed for clarity
+    "Activity ID": "Activity ID",
     "Activity Date": "Activity Date",
     "Activity Name": "Activity Name",
     "Activity Type": "Activity Type",
     "Filename": "Filename",
+    "Moving Time": "Moving Time",
+    "Distance.1": "Distance",
+    "Elevation Gain": "Elevation Gain",
 }
 
 # Localized → canonical activity-type values
 ACTIVITY_TYPE_ALIASES: dict[str, str] = {
-    # German
+    # German (Strava export)
     "Lauf": "Run",
     "Radfahrt": "Ride",
     "Virtuelle Radfahrt": "Virtual Ride",
@@ -39,9 +47,19 @@ ACTIVITY_TYPE_ALIASES: dict[str, str] = {
     "Gewichtstraining": "Weight Training",
     "Yoga": "Yoga",
     "Training": "Workout",
+    # intervals.icu (no spaces) → canonical
+    "TrailRun": "Trail Run",
+    "VirtualRide": "Virtual Ride",
+    "VirtualRun": "Run",
+    "MountainBikeRide": "Mountain Bike Ride",
+    "GravelRide": "Gravel Ride",
+    "WeightTraining": "Weight Training",
+    "AlpineSki": "Alpine Ski",
+    "NordicSki": "Nordic Ski",
+    "Kayaking": "Kayaking",
 }
 
-REQUIRED_COLUMNS = ["Activity Date", "Activity Name", "Activity Type", "Filename"]
+REQUIRED_COLUMNS = ["Activity ID", "Activity Date", "Activity Name", "Activity Type", "Filename"]
 
 
 def normalize(df: pd.DataFrame) -> pd.DataFrame:

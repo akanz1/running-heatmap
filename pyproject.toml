@@ -12,6 +12,8 @@ dependencies = [
     "matplotlib",
     "gpxpy>=1.6.2",
     "tqdm>=4.67.3",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
 ]
 
 [dependency-groups]
