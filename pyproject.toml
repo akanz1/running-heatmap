@@ -11,6 +11,7 @@ dependencies = [
     "scipy",
     "pillow",
     "matplotlib",
+    "gpxpy>=1.6.2",
 ]
 
 [dependency-groups]

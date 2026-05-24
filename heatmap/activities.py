@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import gzip
 import json
 import logging
 import math
 from datetime import date
 from typing import TYPE_CHECKING
 
-import fitparse
 import pandas as pd
 
 from heatmap.constants import EARTH_RADIUS_KM
-from heatmap.constants import SEMICIRCLE_TO_DEG
 from heatmap.localization import normalize
+from heatmap.parsers import parse_track
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,22 +28,16 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _get_gps_start(filepath: Path) -> tuple[float | None, float | None, float | None]:
-    """Return (start_lat, start_lon, spread_m) from a .fit.gz, or (None, None, None)."""
-    lats, lons = [], []
-    try:
-        with gzip.open(filepath, "rb") as f:
-            for msg in fitparse.FitFile(f).get_messages("record"):
-                d = {x.name: x.value for x in msg}
-                if d.get("position_lat") is None or d.get("position_long") is None:
-                    continue
-                lats.append(d["position_lat"] * SEMICIRCLE_TO_DEG)
-                lons.append(d["position_long"] * SEMICIRCLE_TO_DEG)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Failed to read GPS start from %s: %s", filepath, e)
+    """Return (start_lat, start_lon, spread_m) from any supported track format.
 
-    if not lats:
+    Returns (None, None, None) if the file can't be parsed or has no GPS points.
+    """
+    points = parse_track(filepath)
+    if not points:
         return None, None, None
 
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
     mid_lat = (min(lats) + max(lats)) / 2
     spread_m = max(
         (max(lats) - min(lats)) * 111_000,
@@ -96,7 +88,10 @@ def _resolve_gps_starts(runs: pd.DataFrame, activities_dir: Path) -> pd.DataFram
     rows = []
     for _, row in runs.iterrows():
         fn = str(row["Filename"])
-        if fn not in cache:
+        cached = cache.get(fn)
+        # Retry entries that previously failed (lat is None) — old parser may
+        # have lacked support for this file's format.
+        if cached is None or cached[0] is None:
             cache[fn] = list(_get_gps_start(activities_dir / fn))
         lat, lon, spread = cache[fn]
         rows.append({**row, "start_lat": lat, "start_lon": lon, "gps_spread_m": spread})
@@ -105,10 +100,15 @@ def _resolve_gps_starts(runs: pd.DataFrame, activities_dir: Path) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
-def _resolve_home(runs: pd.DataFrame, config: Config) -> tuple[float, float]:
+def _resolve_home(runs: pd.DataFrame, config: Config) -> tuple[float | None, float | None]:
+    """Return (home_lat, home_lon) or (None, None) if no home is needed."""
     if config.home_lat is not None and config.home_lon is not None:
         log.info("Using manual home: %s, %s", config.home_lat, config.home_lon)
         return config.home_lat, config.home_lon
+
+    if not config.needs_home():
+        log.info("Worldwide mode — skipping home detection")
+        return None, None
 
     home_lat, home_lon, n_home = _detect_home(runs)
     log.info(
@@ -131,10 +131,11 @@ def _filter_by_home_radius(runs: pd.DataFrame, home_lat: float, home_lon: float,
     return filtered
 
 
-def load_and_filter(config: Config) -> tuple[pd.DataFrame, float, float, Path]:
+def load_and_filter(config: Config) -> tuple[pd.DataFrame, float | None, float | None, Path]:
     """Load activities CSV, filter by type/date/home radius.
 
     Returns (filtered_runs, home_lat, home_lon, activities_dir).
+    home_lat / home_lon are None in worldwide mode.
     """
     activities_dir = config.resolved_activities_dir()
     log.info("Source: %s", activities_dir)
@@ -147,6 +148,8 @@ def load_and_filter(config: Config) -> tuple[pd.DataFrame, float, float, Path]:
     log.info("After removing no-GPS / indoor: %d", len(runs))
 
     home_lat, home_lon = _resolve_home(runs, config)
-    runs = _filter_by_home_radius(runs, home_lat, home_lon, config.radius_km)
+
+    if config.radius_km is not None and home_lat is not None and home_lon is not None:
+        runs = _filter_by_home_radius(runs, home_lat, home_lon, config.radius_km)
 
     return runs, home_lat, home_lon, activities_dir

@@ -2,18 +2,34 @@ import logging
 
 from heatmap import configure_logging
 from heatmap import run
+from heatmap.config import ActivityType
 from heatmap.config import Config
 
 config = Config(
-    # activities_dir=None,        # None = <project_root>/strava_export
-    # activity_types=["Run"],
-    date_from="2026-01-01",
-    # date_to=None,               # None = today
-    # home_lat=None,              # None = auto-detect from most common start point
-    # home_lon=None,
-    # radius_km=15.0,
-    # meters_per_pixel=3,
-    # blur_sigma_px=10,
+    # Path to your unzipped Strava export folder.
+    # None = <project_root>/strava_export.
+    activities_dir=None,
+
+    # Activity types to include. Use ActivityType enum members or raw strings.
+    # e.g. [ActivityType.RUN, ActivityType.RIDE]
+    activity_types=[ActivityType.RUN],
+
+    # Date filter (YYYY-MM-DD strings); None = unbounded.
+    date_from=None,
+    date_to=None,
+
+    # Manual home center; None = auto-detect (only when needed).
+    # Override e.g. when you've moved cities and auto-detect picks the wrong cluster.
+    home_lat=None,
+    home_lon=None,
+
+    # Drop activities that started more than this far from home.
+    # None = no filter (worldwide).
+    radius_km=None,
+
+    # Drop individual GPS points further than this from home.
+    # None = no clipping (worldwide).
+    track_clip_radius_km=None,
 )
 
 if __name__ == "__main__":
