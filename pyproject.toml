@@ -1,0 +1,23 @@
+[project]
+name = "running-heatmap"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "fitparse",
+    "folium",
+    "pyproj",
+    "scipy",
+    "pillow",
+    "matplotlib",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+order-by-type = false

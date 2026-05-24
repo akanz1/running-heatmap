@@ -17,28 +17,67 @@ The output is a single HTML file with six layers you can switch between:
 
 ## Setup
 
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
 ```
-pip install -r requirements.txt
+make setup
 ```
+
+| Command | What it does |
+|---|---|
+| `make setup` | Create `.venv/` and install deps |
+| `make update` | Upgrade all deps to latest versions |
+| `make run` | Generate `outputs/heatmap.html` |
+| `make clean` | Delete the venv |
 
 ## Usage
 
 1. Request your data from Strava: **Settings → My Account → Download or Delete Your Account → Download Request**
-2. Unzip the export and place the folder next to `heatmap.ipynb`
-3. Update the config cell:
+2. Unzip the export anywhere on your machine
+3. The script auto-detects the export in this order:
+   - `./strava_export/` next to `main.py`
+   - `~/Downloads/strava_export/`
+   - A path you set explicitly: `activities_dir="/path/to/your/export"`
+4. Edit `main.py` to set the date range and any other options:
 
 ```python
-ACTIVITIES_DIR = "your_export_folder"   # name of the unzipped folder
-ACTIVITY_TYPES = ["Run"]                # Run, Ride, Hike, Walk, ...
-DATE_FROM      = "2024-01-01"           # or None for no lower limit
-DATE_TO        = "2024-12-31"           # or None for today
+from heatmap import run
+from heatmap.config import Config
+
+config = Config(
+    # activities_dir=None,        # None = auto-detect
+    # activity_types=["Run"],     # Run, Ride, Hike, Walk, ...
+    date_from="2026-01-01",
+    # date_to=None,               # None = today
+    # home_lat=None,              # None = auto-detect
+    # home_lon=None,
+    # radius_km=15.0,
+)
+
+if __name__ == "__main__":
+    run(config)
 ```
 
-4. Run all cells. Map is saved to `outputs/heatmap.html`.
+5. `make run` — map is saved to `outputs/heatmap.html`.
+
+## Project layout
+
+```
+main.py                entry point — edit Config here
+heatmap/
+├── __init__.py        run() pipeline
+├── config.py          Config dataclass + path auto-detection
+├── constants.py       math constants + colormap node lists
+├── activities.py      CSV load, GPS start, home detect, filter
+├── tracks.py          FIT parsing + on-disk cache
+├── raster.py          rasterize + blur/normalise
+├── colormaps.py       Matplotlib colormaps
+└── render.py          Folium map + legend + save
+```
 
 ### Home detection
 
-Home is auto-detected from the most common activity start point in the date range, then only activities within `RADIUS_KM` of that point are included. It's a heuristic — if you started more runs from somewhere else (work, a club) than home in that period, that location wins. Override it with `HOME_LAT` / `HOME_LON` if needed.
+Home is auto-detected from the most common activity start point in the date range, then only activities within `radius_km` of that point are included. It's a heuristic — if you started more runs from somewhere else (work, a club) than home in that period, that location wins. Override it with `home_lat` / `home_lon` if needed.
 
 ### Caching
 
