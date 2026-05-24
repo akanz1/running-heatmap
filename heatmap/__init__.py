@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import warnings
 
 import numpy as np
@@ -56,6 +57,28 @@ def configure_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(level=level, format="%(levelname)-7s %(name)s: %(message)s")
 
 
+def _confirm_full_rebuild(n_new: int) -> bool:
+    """Prompt the user before the slow track-parse + tile-pyramid rebuild.
+
+    Returns True to proceed, False to abort. Auto-confirms when stdin is not
+    a TTY (CI, piped input) or when HEATMAP_YES=1 is set.
+    """
+    if os.environ.get("HEATMAP_YES") or not sys.stdin.isatty():
+        return True
+    print()
+    print(f"  intervals.icu sync: {n_new} new activit{'y' if n_new == 1 else 'ies'}")
+    print("  Full rebuild parses all tracks and re-rasterises the tile pyramid")
+    print("  (typically a few minutes at z=17).")
+    print("  For sync-only without rebuild, abort and run `make sync` instead.")
+    print("  Set HEATMAP_YES=1 to skip this prompt.")
+    try:
+        ans = input("  Continue with full rebuild? [Y/n] ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+    return ans in ("", "y", "yes")
+
+
 def _clip_tracks(
     tracks: list[tuple[str, list[list]]],
     home_lat: float,
@@ -101,7 +124,11 @@ def run(config: Config) -> str:
         pyramid = load_pyramid_metadata(config.output_dir() / "tiles")
         return build_and_save(pyramid, config)
 
-    sync_intervals_icu(config)
+    n_new = sync_intervals_icu(config)
+
+    if not _confirm_full_rebuild(n_new):
+        log.info("Aborted before full rebuild. Run `make sync` for sync-only.")
+        return ""
 
     runs, home_lat, home_lon = load_and_filter(config)
     if runs.empty:

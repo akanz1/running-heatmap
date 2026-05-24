@@ -48,6 +48,8 @@ Strava-sourced activities on intervals are skipped automatically (their files ar
 
 `HEATMAP_SKIP_SYNC=1 make run` or `Config(sync_enabled=False)` disables the sync step for offline / CI runs.
 
+`make run` syncs first, then prompts before the slow track-parse + tile-pyramid rebuild (typically a few minutes at z=17). Answer `n` to skip the rebuild after seeing the sync count. Set `HEATMAP_YES=1` to auto-confirm (CI / non-TTY runs auto-confirm too).
+
 ## Usage
 
 1. Request your data from Strava: **Settings → My Account → Download or Delete Your Account → Download Request**
