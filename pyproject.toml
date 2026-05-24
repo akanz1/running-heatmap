@@ -7,7 +7,6 @@ dependencies = [
     "pandas",
     "fitparse",
     "folium",
-    "pyproj",
     "scipy",
     "pillow",
     "matplotlib",

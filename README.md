@@ -4,7 +4,7 @@ Code from [this video](https://youtu.be/PA8d4u5T4BM?si=83GTMI449kCsgb4B) — sha
 
 Turns a Strava data export into an interactive heatmap. No API needed - just the zip file Strava lets you download.
 
-The output is a single HTML file with six layers you can switch between:
+The output is a single HTML file plus a tile pyramid (`outputs/tiles/{layer}/{z}/{x}/{y}.png`) with six layers you can switch between:
 
 | Layer | Colour | Shows |
 |---|---|---|
@@ -14,6 +14,8 @@ The output is a single HTML file with six layers you can switch between:
 | Heart rate (average) | Red | Average HR - brighter = higher |
 | Gradient (absolute) | White | Steepness - brighter = steeper |
 | Gradient (change) | Green / purple | Direction - green = descending, purple = ascending |
+
+The map renders sharply at every zoom from continent view (z=2) down to street level (z=14), with Leaflet upscaling beyond that.
 
 ## Setup
 
@@ -27,7 +29,8 @@ make setup
 |---|---|
 | `make setup` | Create `.venv/` and install deps |
 | `make update` | Upgrade all deps to latest versions |
-| `make run` | Generate `outputs/heatmap.html` |
+| `make run` | Generate `outputs/heatmap.html` + tile pyramid |
+| `make serve` | Serve `outputs/` on `http://localhost:8000` |
 | `make lint` | Run `ruff check` |
 | `make format` | Run `ruff check --fix` + `ruff format` |
 | `make clean` | Delete the venv |
@@ -53,12 +56,14 @@ config = Config(
 )
 ```
 
-4. `make run` — map is saved to `outputs/heatmap.html`.
+4. `make run` — heatmap, tiles and HTML are written to `outputs/`.
+5. `make serve` — start a local HTTP server (tile-based maps can't be opened directly from `file://` in modern browsers; the server is required).
+6. Open `http://localhost:8000/heatmap.html`.
 
 ### Recipes
 
 ```python
-# Worldwide, all activities ever — slow on first run (parses every .fit.gz),
+# Worldwide, all activities ever — slow on first run (parses every track file),
 # fast on subsequent runs (uses the cache).
 Config()
 
@@ -85,9 +90,9 @@ heatmap/
 ├── activities.py      CSV load, GPS start, home detect, filter
 ├── parsers.py         FIT / GPX / TCX track-file parsers
 ├── tracks.py          per-activity track loader + on-disk cache
-├── raster.py          rasterize + blur/normalise
+├── tiles.py           sparse tile pyramid: paint, downsample, blur, save
 ├── colormaps.py       Matplotlib colormaps
-├── encoding.py        PNG → base64 data-URI helpers
+├── format.py          pace formatting helpers
 ├── legend.py          HTML legend assembly
 ├── assets.py          static CSS + JS strings injected into the map
 └── render.py          Folium map assembly + save
@@ -106,17 +111,32 @@ Only the headline fields are exposed in `main.py`. The full list of tunables (de
 | `radius_km` | `None` | Activity-level filter |
 | `track_clip_radius_km` | `None` | Point-level filter / output extent cap |
 | `gps_spread_min_m` | `200.0` | Treadmill filter |
-| `meters_per_pixel` | `3` | Raster resolution; auto-bumped if grid would exceed `MAX_GRID_DIMENSION` (8192 px) |
-| `padding_m` | `500` | Padding around GPS extent before rasterizing |
-| `blur_sigma_px` | `10` | Gaussian "glow" |
+| `min_zoom` / `max_zoom` | `None` / `17` | Tile pyramid range. `None` ⇒ auto-fit data to ≥640 px viewport |
+| `min_zoom_target_px` | `640` | Auto-min-zoom heuristic: viewport width data should fill |
+| `max_grid_dim` | `8192` | Safety cap — unused by the sparse renderer in normal use |
+| `padding_m` | `500` | Real-world metres padding around tracks (mostly a safety buffer) |
+| `blur_sigma_px` | `2` | Gaussian "glow" in pixels, applied at every zoom (≈ 2.4 m radius @ z=17) |
 | `map_opacity` | `0.85` | Heat layer opacity over basemap |
 | `speed_min_ms` / `speed_max_ms` | `None` / `None` | Fix pace colormap range; None = auto-percentile |
 | `hr_min_bpm` / `hr_max_bpm` | `None` / `None` | Same for HR |
 | `auto_range_pct` | `5` | Percentile clip for auto-ranges |
 
-### Worldwide mode and the grid-size cap
+### How the tile pyramid works
 
-When `radius_km` and `track_clip_radius_km` are both `None`, the grid is computed from the raw extent of every loaded GPS point. At world scale that would be billions of pixels, so `MAX_GRID_DIMENSION` (8192) caps the largest grid dimension and `meters_per_pixel` is auto-bumped to fit. Expect tracks to look thick at low zoom but smear into single pixels at street level — this is a known limitation of single-PNG rendering. **Tile pyramid output is on the roadmap.**
+For each zoom level from `max_zoom` down to `min_zoom`:
+
+1. **Paint** (at `max_zoom` only): walk every GPS point, route it into one of ~250–2000 sparse 256×256 tiles based on its global pixel coords. Memory scales with the **number of occupied tiles**, not the data's bounding box, so multi-continent datasets are fine.
+2. **Stats**: compute global ranges for pace / HR / gradient and the actual blurred frequency maximum across every tile.
+3. **Blur + normalise + colour-map + save** each tile, pulling neighbours into a temporary buffer so edges don't fade.
+4. **Downsample 2×2 sum** to build the next-lower zoom's sparse dict, then repeat.
+
+Per-zoom stats mean each level autonomously uses its full dynamic range — a continent-wide z=4 view stays visually distinct from a city-level z=17 view.
+
+The viewer clamps user navigation to exactly `[pyramid.min_zoom, pyramid.max_zoom]` — no upscaling (would look mushy past native z=17, since GPS accuracy is around 1–3 m ≈ z=17 anyway) and no downscaling past the level where data fits the screen.
+
+### Iterating on the HTML only
+
+`make run-html-only` reuses the existing `outputs/tiles/` (and its `_pyramid.json` sidecar) and just regenerates `outputs/heatmap.html`. Takes ~1 s instead of the full ~4 min, useful when tweaking `render.py`, `legend.py`, or `assets.py`. Falls back gracefully — re-run `make run` first if the sidecar is missing or the data changed.
 
 ### Logging
 
@@ -137,14 +157,16 @@ Strava exports a mix of formats depending on activity age and the recording devi
 | Format | Source | Fields recovered |
 |---|---|---|
 | `.fit.gz` | Modern Garmin / most devices | lat, lon, speed, HR, altitude |
-| `.gpx.gz` / `.gpx` | Older Strava activities, manual uploads | lat, lon, HR (if present), altitude |
-| `.tcx.gz` | Garmin Training Center format | lat, lon, HR, altitude |
+| `.gpx.gz` / `.gpx` | Older Strava activities, manual uploads | lat, lon, speed (derived from timestamps), HR (if present), altitude |
+| `.tcx.gz` | Garmin Training Center format | lat, lon, speed (derived), HR, altitude |
 
-GPX and TCX don't carry a native speed field, so pace data is only available for FIT activities. Speed-from-timestamps is a possible future improvement.
+For GPX and TCX, speed isn't a native field, so it's derived from consecutive timestamps using Haversine distance. Outliers (>15 m/s) are dropped.
 
 ### Caching
 
 Parsing track files is slow so per-file data is cached. The export folder gets a `_gps_cache.json` (start points only) and the project root gets a `cache/track_cache.json` (full tracks). Changing the date range or config won't re-parse files already in either cache.
+
+Tiles themselves are **not** cached — the `outputs/tiles/` directory is wiped and rebuilt every run. Tile rebuilding is the new dominant cost (~30–60 s for ~500 tracks) but is parallelisable later if needed.
 
 ---
 
@@ -160,10 +182,12 @@ The log scale version exists because a few favourite routes tend to dominate com
 
 Each pixel is the mean across every activity that ever crossed it. A route you used to run slowly but now run fast will show somewhere in the middle. Narrow the date range if you want a specific period.
 
+The HR layer in particular shows **pixel-averaged** HR — a single hard effort gets averaged out by many easier visits to the same pixel, so the visual max is typically well below your actual peak HR. The log output reports raw HR percentiles so you can sanity-check.
+
 ### The gradient layers are only as good as GPS altitude
 
 GPS altitude is much noisier than horizontal position - typically ±10–20 m vertically versus ±3–5 m horizontally. The gradient layers are reliable on hilly terrain but can look noisy on flat routes where the signal-to-noise is poor.
 
-### Why the code uses two different projections
+### Coordinate systems
 
-The raster grid is built in Web Mercator (EPSG:3857) so it aligns directly to the map tile basemap without any reprojection. But Web Mercator distorts distances at higher latitudes, so anything involving real-world metres - the clip radius around home, and the rise/run calculation for gradient - uses a local UTM projection instead. The visual output is unaffected, it just means the underlying measurements are accurate.
+All raster work happens in Web Mercator (EPSG:3857) pixel space, the same coordinate system the basemap tiles use, so no reprojection is needed at render time. Real-world distances (clip radius, segment lengths for gradient) use the Haversine formula directly on lat/lon — accurate everywhere on the globe without picking a UTM zone.

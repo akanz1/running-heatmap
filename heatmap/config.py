@@ -12,11 +12,6 @@ DEFAULT_ACTIVITIES_DIR = PROJECT_ROOT / "strava_export"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "cache"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
-# Cap on output grid dimension (width or height in pixels). When the requested
-# `meters_per_pixel` would produce a grid bigger than this, we bump m/px upward
-# automatically. Prevents accidental gigabyte HTML files at world scale.
-MAX_GRID_DIMENSION = 8192
-
 
 class ActivityType(StrEnum):
     """Canonical Strava activity types after localization → English.
@@ -73,14 +68,38 @@ class Config:
     # --- Treadmill / indoor filter ------------------------------------------
     gps_spread_min_m: float = 200.0
 
-    # --- Raster resolution & padding ----------------------------------------
-    # Web Mercator metres per pixel. Auto-bumped if grid would exceed
-    # MAX_GRID_DIMENSION.
-    meters_per_pixel: int = 3
+    # --- Tile pyramid -------------------------------------------------------
+    # Zoom range to pre-render. Lower z = world view, higher z = street level.
+    # z=5  ≈ 5 km/px   (sub-continent, multi-city)
+    # z=17 ≈ 1.2 m/px  (sidewalk-width — good GPS can resolve this)
+    # min_zoom=None → auto: pick the lowest zoom where the data fills at least
+    # half a 1280 px viewport. Prevents zooming out to "data is a single dot".
+    # Leaflet upscales tiles beyond max_zoom (slightly fuzzy when over-zoomed).
+    # Note: each z step ≈ 4x tiles + 4x peak RAM. z=17 needs ~16 GB free.
+    min_zoom: int | None = None
+    max_zoom: int = 17
+
+    # Auto-min-zoom: viewport width in px the data should fill at min_zoom.
+    # 640 = half of a 1280 px screen. Tweak if you want more/less zoom-out.
+    min_zoom_target_px: int = 640
+
+    # Safety cap on the z=max grid dimension (pixels). If the data's padded
+    # bbox at max_zoom would exceed this, max_zoom is auto-lowered by 1 until
+    # it fits — protects against gigabyte allocations for worldwide-spread data.
+    max_grid_dim: int = 8192
+
+    # Padding around the data's bbox, in real-world metres (converted to
+    # pixels at max_zoom). Prevents tracks from kissing tile edges.
     padding_m: int = 500
 
+    # Gaussian blur sigma in pixels, applied at every zoom level. Constant
+    # sigma in pixel space → visually similar track thickness across zooms.
+    # At z=16 (~2.4 m/px), sigma=2 ≈ 5 m blur radius, tracks ≈ 10 m wide
+    # — at GPS noise floor, can't go meaningfully sharper. Bump higher for
+    # a softer "glow" look at the cost of street-level detail.
+    blur_sigma_px: int = 2
+
     # --- Rendering ----------------------------------------------------------
-    blur_sigma_px: int = 10
     map_opacity: float = 0.85
 
     # --- Colour range — None = auto (percentile clipped) --------------------
@@ -102,6 +121,9 @@ class Config:
 
     def track_cache_path(self) -> Path:
         return DEFAULT_CACHE_DIR / "track_cache.json"
+
+    def output_dir(self) -> Path:
+        return DEFAULT_OUTPUT_DIR
 
     def output_html_path(self) -> Path:
         return DEFAULT_OUTPUT_DIR / "heatmap.html"

@@ -13,8 +13,6 @@ from heatmap.format import pace_min_per_km
 if TYPE_CHECKING:
     import matplotlib.colors as mcolors
 
-    from heatmap.raster import NormalizedLayers
-
 
 def _cmap_to_css(cmap: mcolors.LinearSegmentedColormap, n: int = 14) -> str:
     stops = []
@@ -39,11 +37,16 @@ def _row(row_id: str, title: str, grad_css: str, label_lo: str, label_hi: str, v
     </div>"""
 
 
-def build_legend_html(layers: NormalizedLayers) -> str:
-    s_lo, s_hi = layers.speed_range
-    hr_lo, hr_hi = layers.hr_range
-    g_lo, g_hi = layers.grad_range
-    count_max = int(layers.count_max)
+def build_legend_html(
+    speed_range: tuple[float, float],
+    hr_range: tuple[float, float],
+    grad_range: tuple[float, float],
+    count_max: float,
+) -> str:
+    s_lo, s_hi = speed_range
+    hr_lo, hr_hi = hr_range
+    g_lo, g_hi = grad_range
+    count_max_int = int(count_max)
 
     freq_css = _cmap_to_css(CMAP_COUNT)
     pace_css = _cmap_to_css(CMAP_SPEED)
@@ -59,8 +62,8 @@ def build_legend_html(layers: NormalizedLayers) -> str:
     border:1px solid rgba(255,255,255,0.10);
     box-shadow:0 2px 8px rgba(0,0,0,0.6);
 ">
-  {_row("legend-frequency", "Frequency (linear)", freq_css, "1 pass", f"{count_max} passes", visible=True)}
-  {_row("legend-frequency-log", "Frequency (log)", freq_css, "1 pass", f"{count_max} passes (log scale)")}
+  {_row("legend-frequency", "Frequency (linear)", freq_css, "1 pass", f"{count_max_int} passes")}
+  {_row("legend-frequency-log", "Frequency (log)", freq_css, "1 pass", f"{count_max_int} passes (log scale)", visible=True)}
   {_row("legend-pace-avg", "Pace (average)", pace_css, pace_min_per_km(s_lo), pace_min_per_km(s_hi))}
   {_row("legend-heart-rate-avg", "Heart rate (average)", hr_css, f"{hr_lo:.0f} bpm", f"{hr_hi:.0f} bpm")}
   {

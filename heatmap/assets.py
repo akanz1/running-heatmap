@@ -36,15 +36,13 @@ LAYER_CONTROL_CSS = """
 </style>
 """
 
-# Enforces single-overlay selection in the layer control + syncs legend visibility.
+# Heatmap layers are configured as Leaflet "base layers" (overlay=False) so
+# the LayerControl renders them as native radio buttons — Leaflet enforces
+# mutual exclusion automatically. This script only syncs legend visibility
+# when the active base layer changes.
 EXCLUSIVE_OVERLAY_JS = """
 <script>
 (function() {
-    var exclusiveNames = [
-        "Frequency (linear)", "Frequency (log)",
-        "Pace (average)", "Heart rate (average)",
-        "Gradient (absolute)", "Gradient (change)"
-    ];
     var legendIds = {
         "Frequency (linear)":   "legend-frequency",
         "Frequency (log)":      "legend-frequency-log",
@@ -60,21 +58,14 @@ EXCLUSIVE_OVERLAY_JS = """
         });
     }
     function setup() {
-        var mapObj = null, overlays = null;
+        var mapObj = null;
         for (var k in window) {
             try {
-                if (!mapObj   && window[k] instanceof L.Map) mapObj = window[k];
-                if (!overlays && window[k] && window[k].overlays && window[k].base_layers)
-                    overlays = window[k].overlays;
+                if (window[k] instanceof L.Map) { mapObj = window[k]; break; }
             } catch(e) {}
         }
-        if (!mapObj || !overlays) { setTimeout(setup, 100); return; }
-        mapObj.on('overlayadd', function(e) {
-            if (!exclusiveNames.includes(e.name)) return;
-            exclusiveNames.forEach(function(name) {
-                if (name !== e.name && overlays[name] && mapObj.hasLayer(overlays[name]))
-                    mapObj.removeLayer(overlays[name]);
-            });
+        if (!mapObj) { setTimeout(setup, 100); return; }
+        mapObj.on('baselayerchange', function(e) {
             showLegend(e.name);
         });
     }

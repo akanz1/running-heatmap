@@ -1,49 +1,60 @@
+"""Folium map assembly: wraps the rendered tile pyramid in an HTML viewer.
+
+## Zoom limits — a brief tour
+
+Leaflet exposes four zoom-related knobs. We collapse them all to
+``pyramid.{min,max}_zoom`` so they stay consistent:
+
+| Knob                                  | Meaning                                                    |
+|---------------------------------------|------------------------------------------------------------|
+| ``L.Map.{min,max}Zoom``               | Slider / wheel limits — what zooms the *user* can reach    |
+| ``L.tileLayer.{min,max}Zoom``         | Layer visibility window — hidden outside this range        |
+| ``L.tileLayer.{min,max}NativeZoom``   | Where tile PNGs actually exist on disk — out of range,     |
+|                                       | Leaflet up/downscales the nearest native tile              |
+
+If all four equal ``pyramid.{min,max}_zoom``, the user can navigate exactly
+the range we rendered, with no upscaling and no downscaling artifacts.
+
+Folium gotcha: ``folium.Map(min_zoom=..., max_zoom=...)`` silently drops
+those kwargs when ``tiles=None`` (they're routed to a non-existent default
+tile layer). We assign ``m.options["minZoom"|"maxZoom"]`` directly so they
+actually reach ``L.map()``.
+"""
+
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
 import folium
-from pyproj import Transformer
 
 from heatmap.assets import EXCLUSIVE_OVERLAY_JS
 from heatmap.assets import LAYER_CONTROL_CSS
-from heatmap.colormaps import CMAP_COUNT
-from heatmap.colormaps import CMAP_ELEV
-from heatmap.colormaps import CMAP_HR
-from heatmap.colormaps import CMAP_SPEED
-from heatmap.encoding import colormap_to_uri
-from heatmap.encoding import rgba_with_alpha_uri
-from heatmap.encoding import white_alpha_uri
 from heatmap.legend import build_legend_html
 
 if TYPE_CHECKING:
     from heatmap.config import Config
-    from heatmap.raster import NormalizedLayers
-    from heatmap.raster import RasterGrids
+    from heatmap.tiles import PyramidResult
 
 log = logging.getLogger(__name__)
 
 
-def _bounds_and_centre(grids: RasterGrids) -> tuple[list[list[float]], list[float]]:
-    from_wm = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
-    lon_nw, lat_nw = from_wm.transform(grids.x_min_wm, grids.y_max_wm)
-    lon_se, lat_se = from_wm.transform(grids.x_max_wm, grids.y_min_wm)
-    bounds = [[lat_se, lon_nw], [lat_nw, lon_se]]
-    centre = [(lat_nw + lat_se) / 2, (lon_nw + lon_se) / 2]
-    return bounds, centre
+# (display_name, layer_subdir, visible_by_default)
+_LAYER_SPEC: list[tuple[str, str, bool]] = [
+    ("Frequency (linear)", "count", False),
+    ("Frequency (log)", "count_log", True),
+    ("Pace (average)", "speed", False),
+    ("Heart rate (average)", "hr", False),
+    ("Gradient (absolute)", "grad", False),
+    ("Gradient (change)", "elev", False),
+]
 
 
-def _encode_layers(layers: NormalizedLayers) -> list[tuple[str, str, bool]]:
-    """Encode each normalised layer to a PNG data URI. Returns (name, uri, default_visible)."""
-    return [
-        ("Frequency (linear)", colormap_to_uri(layers.count_norm, CMAP_COUNT), True),
-        ("Frequency (log)", colormap_to_uri(layers.count_log_norm, CMAP_COUNT), False),
-        ("Pace (average)", rgba_with_alpha_uri(layers.speed_norm, layers.alpha_speed, CMAP_SPEED), False),
-        ("Heart rate (average)", rgba_with_alpha_uri(layers.hr_norm, layers.alpha_hr, CMAP_HR), False),
-        ("Gradient (absolute)", white_alpha_uri(layers.alpha_grad), False),
-        ("Gradient (change)", rgba_with_alpha_uri((layers.elev_norm + 1) / 2, layers.alpha_elev, CMAP_ELEV), False),
-    ]
+# 1x1 transparent PNG, used as the fallback for missing tiles so Leaflet
+# doesn't show the broken-image icon over sparse-pyramid gaps.
+_TRANSPARENT_PIXEL_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
 
 
 def _add_basemap(m: folium.Map) -> None:
@@ -52,67 +63,92 @@ def _add_basemap(m: folium.Map) -> None:
         name="Basemap",
         control=False,
         show=True,
+        no_wrap=True,
+        error_tile_url=_TRANSPARENT_PIXEL_URI,
     ).add_to(m)
 
 
-def _add_raw_tracks(m: folium.Map, tracks: list[tuple[str, list[list]]]) -> None:
-    group = folium.FeatureGroup(name="Raw GPS tracks", show=False)
-    for label, pts in tracks:
-        folium.PolyLine(
-            locations=[(p[0], p[1]) for p in pts],
-            color="#fc4c02",
-            weight=1,
-            opacity=0.4,
-            tooltip=label,
-        ).add_to(group)
-    group.add_to(m)
-
-
-def _add_raster_layers(
+def _add_raster_tilelayers(
     m: folium.Map,
-    encoded: list[tuple[str, str, bool]],
-    bounds: list[list[float]],
+    pyramid: PyramidResult,
     opacity: float,
 ) -> None:
-    for name, uri, visible in encoded:
-        fg = folium.FeatureGroup(name=name, show=visible)
-        folium.raster_layers.ImageOverlay(
-            image=uri,
-            bounds=bounds,
+    """Add one Folium TileLayer per heatmap layer.
+
+    `overlay=False` puts these in the "base layers" section of the LayerControl,
+    rendering as native radio buttons (Leaflet enforces mutual exclusion).
+    The actual basemap stays out of the control entirely (`control=False`).
+
+    `bounds` restricts tile requests to the data's lat/lon bbox — Leaflet
+    won't fetch tiles outside it, cutting 404 noise in the dev server log.
+
+    All four zoom limits collapse to `pyramid.{min,max}_zoom`. See module
+    docstring for the rationale.
+    """
+    z_min, z_max = pyramid.min_zoom, pyramid.max_zoom
+    for display_name, subdir, visible in _LAYER_SPEC:
+        folium.TileLayer(
+            tiles=f"tiles/{subdir}/{{z}}/{{x}}/{{y}}.png",
+            attr="Strava heatmap",
+            name=display_name,
+            overlay=False,
+            control=True,
+            min_zoom=z_min,
+            max_zoom=z_max,
+            min_native_zoom=z_min,
+            max_native_zoom=z_max,
+            tms=False,
             opacity=opacity,
-            interactive=False,
-            cross_origin=False,
-            zindex=1,
-        ).add_to(fg)
-        fg.add_to(m)
+            show=visible,
+            no_wrap=True,
+            bounds=pyramid.bounds_latlon,
+            error_tile_url=_TRANSPARENT_PIXEL_URI,
+        ).add_to(m)
 
 
 def build_and_save(
-    grids: RasterGrids,
-    normalized: NormalizedLayers,
-    tracks: list[tuple[str, list[list]]],
+    pyramid: PyramidResult,
     config: Config,
 ) -> str:
-    """Assemble the Folium map, embed all layers, save HTML. Returns output path."""
-    bounds, centre = _bounds_and_centre(grids)
+    """Assemble the Folium map with TileLayers, save HTML. Returns output path."""
+    bounds = pyramid.bounds_latlon
+    centre = pyramid.centre_latlon
+    z_min, z_max = pyramid.min_zoom, pyramid.max_zoom
 
-    log.info("Rendering layers…")
-    encoded = _encode_layers(normalized)
-    log.info("Done — %d layers encoded", len(encoded))
+    # zoom_start is overridden by fit_bounds below but must be inside [z_min, z_max]
+    # to keep Folium happy.
+    m = folium.Map(
+        location=centre,
+        zoom_start=max(z_min, min(z_max, 12)),
+        tiles=None,
+        control_scale=True,
+        world_copy_jump=False,
+    )
+    m.options["minZoom"] = z_min
+    m.options["maxZoom"] = z_max
+    m.fit_bounds(bounds)
 
-    m = folium.Map(location=centre, zoom_start=14, tiles=None, control_scale=True)
     _add_basemap(m)
-    _add_raw_tracks(m, tracks)
-    _add_raster_layers(m, encoded, bounds, config.map_opacity)
+    _add_raster_tilelayers(m, pyramid, config.map_opacity)
 
     folium.LayerControl(collapsed=False).add_to(m)
     m.get_root().html.add_child(folium.Element(LAYER_CONTROL_CSS))
-    m.get_root().html.add_child(folium.Element(build_legend_html(normalized)))
+    m.get_root().html.add_child(
+        folium.Element(
+            build_legend_html(
+                speed_range=pyramid.speed_range,
+                hr_range=pyramid.hr_range,
+                grad_range=pyramid.grad_range,
+                count_max=pyramid.count_max,
+            )
+        )
+    )
     m.get_root().html.add_child(folium.Element(EXCLUSIVE_OVERLAY_JS))
 
     output_path = config.output_html_path()
     output_path.parent.mkdir(exist_ok=True)
     m.save(str(output_path))
     log.info("Saved: %s", output_path)
-    log.info("Open:  file://%s", output_path.resolve())
+    log.info("Serve: cd %s && python -m http.server 8000", output_path.parent)
+    log.info("Open:  http://localhost:8000/%s", output_path.name)
     return str(output_path)
