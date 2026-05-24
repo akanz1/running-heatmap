@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import gzip
 import json
-from pathlib import Path
+import logging
+from typing import TYPE_CHECKING
 
 import fitparse
-import pandas as pd
 
 from heatmap.constants import SEMICIRCLE_TO_DEG
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pandas as pd
+
+log = logging.getLogger(__name__)
+
+# Track points use 5 fields: [lat, lon, speed_ms, hr_bpm, alt_m]
+TRACK_POINT_FIELDS = 5
 
 
 def _load_fit_track(filepath: Path) -> list[list]:
@@ -26,60 +36,53 @@ def _load_fit_track(filepath: Path) -> list[list]:
                 lat = d["position_lat"] * SEMICIRCLE_TO_DEG
                 lon = d["position_long"] * SEMICIRCLE_TO_DEG
                 # Use `is not None` not `or` — zero speed (stationary) is valid
-                speed = (
-                    d.get("enhanced_speed")
-                    if d.get("enhanced_speed") is not None
-                    else d.get("speed")
-                )
+                speed = d.get("enhanced_speed") if d.get("enhanced_speed") is not None else d.get("speed")
                 hr = d.get("heart_rate")
-                alt = (
-                    d.get("enhanced_altitude")
-                    if d.get("enhanced_altitude") is not None
-                    else d.get("altitude")
-                )
+                alt = d.get("enhanced_altitude") if d.get("enhanced_altitude") is not None else d.get("altitude")
                 points.append([lat, lon, speed, hr, alt])
-    except Exception as e:
-        print(f"  Warning {filepath}: {e}")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Failed to parse %s: %s", filepath, e)
     return points
+
+
+def _load_cache(cache_path: Path) -> dict:
+    if not cache_path.exists():
+        return {}
+    cache = json.loads(cache_path.read_text())
+    stale = [k for k, v in cache.items() if v and len(v[0]) < TRACK_POINT_FIELDS]
+    if stale:
+        log.info("Clearing %d stale cache entries (missing altitude field)", len(stale))
+        for k in stale:
+            del cache[k]
+    return cache
 
 
 def load_tracks(
     runs: pd.DataFrame,
-    activities_dir: str,
-    cache_path: str,
+    activities_dir: Path,
+    cache_path: Path,
 ) -> list[tuple[str, list[list]]]:
     """Parse FIT files with disk caching.
 
     Returns list of (label, [[lat, lon, speed, hr, alt], ...]).
     """
-    cache_file = Path(cache_path)
-    cache_file.parent.mkdir(exist_ok=True)
-    cache: dict = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+    cache_path.parent.mkdir(exist_ok=True)
+    cache = _load_cache(cache_path)
 
-    # Invalidate entries missing the altitude field (old 4-field format)
-    stale = [k for k, v in cache.items() if v and len(v[0]) < 5]
-    if stale:
-        print(f"  Clearing {len(stale)} stale cache entries (missing altitude field)")
-        for k in stale:
-            del cache[k]
-
-    tracks = []
+    tracks: list[tuple[str, list[list]]] = []
     for _, row in runs.iterrows():
         fn = str(row["Filename"])
         label = f"{row['Activity Date'].date()} {row['Activity Name']}"
 
-        if fn in cache:
-            pts = cache[fn]
-        else:
-            print(f"  Parsing {fn} …")
-            pts = _load_fit_track(Path(activities_dir) / fn)
-            cache[fn] = pts
+        if fn not in cache:
+            log.info("Parsing %s …", fn)
+            cache[fn] = _load_fit_track(activities_dir / fn)
 
-        if pts:
-            tracks.append((label, pts))
+        if cache[fn]:
+            tracks.append((label, cache[fn]))
 
-    cache_file.write_text(json.dumps(cache))
+    cache_path.write_text(json.dumps(cache))
 
     total_pts = sum(len(pts) for _, pts in tracks)
-    print(f"\nLoaded {len(tracks)} tracks, {total_pts:,} GPS points")
+    log.info("Loaded %d tracks, %s GPS points", len(tracks), f"{total_pts:,}")
     return tracks

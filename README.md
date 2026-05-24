@@ -28,24 +28,25 @@ make setup
 | `make setup` | Create `.venv/` and install deps |
 | `make update` | Upgrade all deps to latest versions |
 | `make run` | Generate `outputs/heatmap.html` |
+| `make lint` | Run `ruff check` |
+| `make format` | Run `ruff check --fix` + `ruff format` |
 | `make clean` | Delete the venv |
 
 ## Usage
 
 1. Request your data from Strava: **Settings → My Account → Download or Delete Your Account → Download Request**
-2. Unzip the export anywhere on your machine
-3. The script auto-detects the export in this order:
-   - `./strava_export/` next to `main.py`
-   - `~/Downloads/strava_export/`
-   - A path you set explicitly: `activities_dir="/path/to/your/export"`
-4. Edit `main.py` to set the date range and any other options:
+2. Unzip the export. By default the script looks for `<project_root>/strava_export/`. To use a different location, set `activities_dir` in the `Config` below.
+3. Edit `main.py` to set the date range and any other options:
 
 ```python
+import logging
+
+from heatmap import configure_logging
 from heatmap import run
 from heatmap.config import Config
 
 config = Config(
-    # activities_dir=None,        # None = auto-detect
+    # activities_dir=None,        # None = <project_root>/strava_export
     # activity_types=["Run"],     # Run, Ride, Hike, Walk, ...
     date_from="2026-01-01",
     # date_to=None,               # None = today
@@ -55,25 +56,38 @@ config = Config(
 )
 
 if __name__ == "__main__":
+    configure_logging(level=logging.INFO)
     run(config)
 ```
 
-5. `make run` — map is saved to `outputs/heatmap.html`.
+4. `make run` — map is saved to `outputs/heatmap.html`.
 
 ## Project layout
 
 ```
 main.py                entry point — edit Config here
 heatmap/
-├── __init__.py        run() pipeline
-├── config.py          Config dataclass + path auto-detection
-├── constants.py       math constants + colormap node lists
+├── __init__.py        run() pipeline + configure_logging()
+├── config.py          Config dataclass + path resolution
+├── constants.py       math constants + colormap node definitions
+├── localization.py    map non-English column names + activity types to English
 ├── activities.py      CSV load, GPS start, home detect, filter
 ├── tracks.py          FIT parsing + on-disk cache
 ├── raster.py          rasterize + blur/normalise
 ├── colormaps.py       Matplotlib colormaps
-└── render.py          Folium map + legend + save
+├── encoding.py        PNG → base64 data-URI helpers
+├── legend.py          HTML legend assembly
+├── assets.py          static CSS + JS strings injected into the map
+└── render.py          Folium map assembly + save
 ```
+
+### Logging
+
+Every module logs through `logging.getLogger(__name__)`. `configure_logging()` (called from `main.py` or automatically from `run()`) sets up a single root handler. Bump to `logging.DEBUG` for more detail.
+
+### Non-English exports
+
+Strava exports column names and activity types in the user's account language. `localization.py` translates them to canonical English so the rest of the code stays language-agnostic. German is included; add other locales to `COLUMN_ALIASES` / `ACTIVITY_TYPE_ALIASES` as needed.
 
 ### Home detection
 

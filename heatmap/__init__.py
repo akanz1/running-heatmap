@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 
 from heatmap.activities import load_and_filter
@@ -11,7 +12,15 @@ from heatmap.tracks import load_tracks
 
 warnings.filterwarnings("ignore")
 
-__all__ = ["run", "Config"]
+__all__ = ["Config", "configure_logging", "run"]
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Initialise root logger formatting. Idempotent."""
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    logging.basicConfig(level=level, format="%(levelname)-7s %(name)s: %(message)s")
 
 
 def run(config: Config) -> str:
@@ -19,15 +28,17 @@ def run(config: Config) -> str:
 
     Returns the path to the saved HTML file.
     """
+    configure_logging()
+
     runs, home_lat, home_lon, activities_dir = load_and_filter(config)
     if runs.empty:
-        raise ValueError("No activities after filtering — check config filters.")
+        msg = "No activities after filtering — check config filters."
+        raise ValueError(msg)
 
-    tracks = load_tracks(runs, activities_dir, config.track_cache)
+    tracks = load_tracks(runs, activities_dir, config.track_cache_path())
     if not tracks:
-        raise ValueError(
-            "No tracks loaded — check ACTIVITIES_DIR, ACTIVITY_TYPES, and date filters."
-        )
+        msg_0 = "No tracks loaded — check activity_types and date filters."
+        raise ValueError(msg_0)
 
     grids = rasterize(tracks, home_lat, home_lon, config)
     normalized = blur_and_normalize(grids, config)

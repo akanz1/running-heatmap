@@ -3,22 +3,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
-from typing import Optional
+
+# Project root = parent of the `heatmap/` package directory.
+# Anchoring paths here means `make run` works regardless of CWD.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ACTIVITIES_DIR = PROJECT_ROOT / "strava_export"
+DEFAULT_CACHE_DIR = PROJECT_ROOT / "cache"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
 @dataclass
 class Config:
-    # Activity source — None triggers auto-detection
-    activities_dir: Optional[str] = None
+    # Activity source — None uses DEFAULT_ACTIVITIES_DIR
+    activities_dir: str | None = None
     activity_types: list[str] = field(default_factory=lambda: ["Run"])
 
     # Date filter (inclusive); None = unbounded
-    date_from: Optional[str] = None
-    date_to: Optional[str] = None
+    date_from: str | None = None
+    date_to: str | None = None
 
     # Home location; None = auto-detected from most common start point
-    home_lat: Optional[float] = None
-    home_lon: Optional[float] = None
+    home_lat: float | None = None
+    home_lon: float | None = None
     radius_km: float = 15.0
 
     # Exclude indoor / treadmill activities
@@ -27,41 +33,29 @@ class Config:
     # Raster
     meters_per_pixel: int = 3
     padding_m: int = 500
-    track_clip_radius_km: Optional[float] = 12.0
+    track_clip_radius_km: float | None = 12.0
 
     # Rendering
     blur_sigma_px: int = 10
     map_opacity: float = 0.85
 
     # Colour range — None = auto (percentile clipped)
-    speed_min_ms: Optional[float] = None
-    speed_max_ms: Optional[float] = None
-    hr_min_bpm: Optional[float] = None
-    hr_max_bpm: Optional[float] = None
+    speed_min_ms: float | None = None
+    speed_max_ms: float | None = None
+    hr_min_bpm: float | None = None
+    hr_max_bpm: float | None = None
     auto_range_pct: int = 5
 
-    # Paths
-    track_cache: str = "cache/track_cache.json"
-    output_html: str = "outputs/heatmap.html"
+    def resolved_activities_dir(self) -> Path:
+        """Return the export folder, validating that activities.csv exists."""
+        path = Path(self.activities_dir) if self.activities_dir else DEFAULT_ACTIVITIES_DIR
+        if not (path / "activities.csv").exists():
+            msg = f"activities.csv not found in {path}. Set activities_dir in Config to override the default."
+            raise FileNotFoundError(msg)
+        return path
 
-    def resolved_activities_dir(self) -> str:
-        """Return the first candidate path that contains activities.csv."""
-        candidates = [
-            Path(self.activities_dir) if self.activities_dir else None,
-            Path("strava_export"),
-            Path.home() / "Downloads" / "strava_export",
-        ]
-        resolved = next(
-            (
-                p
-                for p in candidates
-                if p is not None and (p / "activities.csv").exists()
-            ),
-            None,
-        )
-        if resolved is None:
-            raise FileNotFoundError(
-                "Export folder not found. Set activities_dir to its path.\n"
-                "Searched: ./strava_export, ~/Downloads/strava_export"
-            )
-        return str(resolved)
+    def track_cache_path(self) -> Path:
+        return DEFAULT_CACHE_DIR / "track_cache.json"
+
+    def output_html_path(self) -> Path:
+        return DEFAULT_OUTPUT_DIR / "heatmap.html"

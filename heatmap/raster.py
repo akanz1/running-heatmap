@@ -1,17 +1,36 @@
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 from pyproj import Transformer
 from scipy.ndimage import gaussian_filter
 
-from heatmap.config import Config
+if TYPE_CHECKING:
+    from heatmap.config import Config
+
+log = logging.getLogger(__name__)
+
+# Minimum segment distance (in projected metres) before computing gradient.
+# Below this the rise/run ratio is dominated by GPS noise.
+MIN_SEGMENT_DIST_M = 0.5
+
+# Presence-mask saturation percentile — lower = brighter, more saturated alpha
+PRESENCE_PCT = 10
+
+
+# --------------------------------------------------------------------------- #
+# Data containers
+# --------------------------------------------------------------------------- #
 
 
 @dataclass
 class RasterGrids:
+    """Raw value grids accumulated from GPS samples, in Web Mercator pixel space."""
+
     count_grid: np.ndarray
     speed_sum: np.ndarray
     speed_n: np.ndarray
@@ -21,11 +40,30 @@ class RasterGrids:
     grad_n: np.ndarray
     elev_sum: np.ndarray
     elev_n: np.ndarray
-    # Web Mercator bounding box of the raster
     x_min_wm: float
     x_max_wm: float
     y_min_wm: float
     y_max_wm: float
+
+    @classmethod
+    def empty(cls, grid_w: int, grid_h: int, bounds: tuple[float, float, float, float]) -> RasterGrids:
+        z = lambda: np.zeros((grid_h, grid_w), dtype=np.float32)  # noqa: E731
+        x_min, x_max, y_min, y_max = bounds
+        return cls(
+            count_grid=z(),
+            speed_sum=z(),
+            speed_n=z(),
+            hr_sum=z(),
+            hr_n=z(),
+            grad_sum=z(),
+            grad_n=z(),
+            elev_sum=z(),
+            elev_n=z(),
+            x_min_wm=x_min,
+            x_max_wm=x_max,
+            y_min_wm=y_min,
+            y_max_wm=y_max,
+        )
 
 
 @dataclass
@@ -40,21 +78,177 @@ class NormalizedLayers:
     alpha_grad: np.ndarray
     elev_norm: np.ndarray
     alpha_elev: np.ndarray
-    # Scale metadata for legend labels
     speed_range: tuple[float, float]
     hr_range: tuple[float, float]
     grad_range: tuple[float, float]
     count_max: float
 
 
-def _make_transformers(home_lat: float, home_lon: float):
-    to_wm = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    from_wm = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
-    utm_zone = int((home_lon + 180) / 6) + 1
-    utm_base = 32700 if home_lat < 0 else 32600
-    utm_crs = f"EPSG:{utm_base + utm_zone}"
-    to_utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
-    return to_wm, from_wm, to_utm, utm_crs
+# --------------------------------------------------------------------------- #
+# Projections
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Projections:
+    """Bundle of pyproj transformers anchored to a home point."""
+
+    to_wm: Transformer
+    from_wm: Transformer
+    to_utm: Transformer
+    utm_crs: str
+
+    @classmethod
+    def for_home(cls, home_lat: float, home_lon: float) -> Projections:
+        to_wm = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+        from_wm = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+        utm_zone = int((home_lon + 180) / 6) + 1
+        utm_base = 32700 if home_lat < 0 else 32600
+        utm_crs = f"EPSG:{utm_base + utm_zone}"
+        to_utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+        return cls(to_wm=to_wm, from_wm=from_wm, to_utm=to_utm, utm_crs=utm_crs)
+
+
+# --------------------------------------------------------------------------- #
+# Rasterization
+# --------------------------------------------------------------------------- #
+
+
+def _compute_grid_bounds(
+    tracks: list[tuple[str, list[list]]],
+    proj: Projections,
+    home_x_utm: float,
+    home_y_utm: float,
+    clip_m: float | None,
+    padding_m: int,
+) -> tuple[float, float, float, float]:
+    if clip_m is None:
+        all_lats = np.array([p[0] for _, pts in tracks for p in pts])
+        all_lons = np.array([p[1] for _, pts in tracks for p in pts])
+        xs, ys = proj.to_wm.transform(all_lons, all_lats)
+        log.info("Grid from raw GPS extents (no clip radius set)")
+        return xs.min() - padding_m, xs.max() + padding_m, ys.min() - padding_m, ys.max() + padding_m
+
+    clipped_xs, clipped_ys = [], []
+    for _, pts in tracks:
+        lats_a = np.array([p[0] for p in pts])
+        lons_a = np.array([p[1] for p in pts])
+        xs_utm, ys_utm = proj.to_utm.transform(lons_a, lats_a)
+        mask = ((xs_utm - home_x_utm) ** 2 + (ys_utm - home_y_utm) ** 2) <= clip_m**2
+        if mask.any():
+            xs_wm, ys_wm = proj.to_wm.transform(lons_a[mask], lats_a[mask])
+            clipped_xs.extend(xs_wm.tolist())
+            clipped_ys.extend(ys_wm.tolist())
+    log.info("Grid from clipped GPS extents (clip radius: %.1f km)", clip_m / 1000)
+    return (
+        min(clipped_xs) - padding_m,
+        max(clipped_xs) + padding_m,
+        min(clipped_ys) - padding_m,
+        max(clipped_ys) + padding_m,
+    )
+
+
+def _paint_segment(
+    grids: RasterGrids,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    speed_val: float | None,
+    hr_val: float | None,
+    grad_val: float | None,
+    elev_val: float | None,
+) -> None:
+    dx, dy = x2 - x1, y2 - y1
+    n_steps = max(int(max(abs(dx), abs(dy))) + 1, 1)
+    h, w = grids.speed_sum.shape
+    for i in range(n_steps + 1):
+        t = i / n_steps
+        xi = round(x1 + t * dx)
+        yi = round(y1 + t * dy)
+        if not (0 <= xi < w and 0 <= yi < h):
+            continue
+        if speed_val is not None:
+            grids.speed_sum[yi, xi] += speed_val
+            grids.speed_n[yi, xi] += 1
+        if hr_val is not None:
+            grids.hr_sum[yi, xi] += hr_val
+            grids.hr_n[yi, xi] += 1
+        if grad_val is not None:
+            grids.grad_sum[yi, xi] += grad_val
+            grids.grad_n[yi, xi] += 1
+        if elev_val is not None:
+            grids.elev_sum[yi, xi] += elev_val
+            grids.elev_n[yi, xi] += 1
+
+
+def _segment_metrics(
+    p0: list,
+    p1: list,
+    x0_utm: float,
+    y0_utm: float,
+    x1_utm: float,
+    y1_utm: float,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Return (speed, hr, abs_gradient, signed_elev_change) for a segment."""
+    s0, s1 = p0[2], p1[2]
+    h0, h1 = p0[3], p1[3]
+    a0, a1 = p0[4], p1[4]
+
+    seg_speed = (s0 + s1) / 2 if s0 is not None and s1 is not None else (s0 if s0 is not None else s1)
+    seg_hr = (h0 + h1) / 2 if h0 is not None and h1 is not None else (h0 if h0 is not None else h1)
+
+    if a0 is None or a1 is None:
+        return seg_speed, seg_hr, None, None
+
+    d_dist = math.sqrt((x1_utm - x0_utm) ** 2 + (y1_utm - y0_utm) ** 2)
+    if d_dist < MIN_SEGMENT_DIST_M:
+        return seg_speed, seg_hr, None, None
+
+    return seg_speed, seg_hr, abs(a1 - a0) / d_dist, a1 - a0
+
+
+def _paint_track(
+    grids: RasterGrids,
+    pts: list[list],
+    proj: Projections,
+    home_x_utm: float,
+    home_y_utm: float,
+    clip_m: float | None,
+    meters_per_pixel: int,
+    grid_w: int,
+    grid_h: int,
+) -> None:
+    lats_a = np.array([p[0] for p in pts])
+    lons_a = np.array([p[1] for p in pts])
+    xs_utm, ys_utm = proj.to_utm.transform(lons_a, lats_a)
+    xs_wm, ys_wm = proj.to_wm.transform(lons_a, lats_a)
+
+    if clip_m is not None:
+        mask = ((xs_utm - home_x_utm) ** 2 + (ys_utm - home_y_utm) ** 2) <= clip_m**2
+        if not mask.any():
+            return
+        pts = [pts[i] for i in range(len(pts)) if mask[i]]
+        xs_utm, ys_utm, xs_wm, ys_wm = xs_utm[mask], ys_utm[mask], xs_wm[mask], ys_wm[mask]
+
+    px = (xs_wm - grids.x_min_wm) / meters_per_pixel
+    py = (grids.y_max_wm - ys_wm) / meters_per_pixel
+
+    for i in range(len(pts)):
+        xi, yi = round(px[i]), round(py[i])
+        if 0 <= xi < grid_w and 0 <= yi < grid_h:
+            grids.count_grid[yi, xi] += 1
+
+    for i in range(len(pts) - 1):
+        speed, hr, grad, elev = _segment_metrics(
+            pts[i],
+            pts[i + 1],
+            xs_utm[i],
+            ys_utm[i],
+            xs_utm[i + 1],
+            ys_utm[i + 1],
+        )
+        _paint_segment(grids, px[i], py[i], px[i + 1], py[i + 1], speed, hr, grad, elev)
 
 
 def rasterize(
@@ -64,300 +258,245 @@ def rasterize(
     config: Config,
 ) -> RasterGrids:
     """Paint GPS tracks onto value grids in Web Mercator pixel space."""
-    to_wm, _from_wm, to_utm, utm_crs = _make_transformers(home_lat, home_lon)
-    print(f"Rasterising in EPSG:3857; clip check via {utm_crs}")
+    proj = Projections.for_home(home_lat, home_lon)
+    log.info("Rasterising in EPSG:3857; clip check via %s", proj.utm_crs)
 
-    home_x_utm, home_y_utm = to_utm.transform(home_lon, home_lat)
-    clip_m = (
-        config.track_clip_radius_km * 1000
-        if config.track_clip_radius_km is not None
-        else None
+    home_x_utm, home_y_utm = proj.to_utm.transform(home_lon, home_lat)
+    clip_m = config.track_clip_radius_km * 1000 if config.track_clip_radius_km is not None else None
+
+    x_min_wm, x_max_wm, y_min_wm, y_max_wm = _compute_grid_bounds(
+        tracks,
+        proj,
+        home_x_utm,
+        home_y_utm,
+        clip_m,
+        config.padding_m,
     )
-
-    # Grid bounds
-    if clip_m is not None:
-        clipped_xs, clipped_ys = [], []
-        for _, pts in tracks:
-            lats_a = np.array([p[0] for p in pts])
-            lons_a = np.array([p[1] for p in pts])
-            xs_utm, ys_utm = to_utm.transform(lons_a, lats_a)
-            mask = (
-                (xs_utm - home_x_utm) ** 2 + (ys_utm - home_y_utm) ** 2
-            ) <= clip_m**2
-            if mask.any():
-                xs_wm, ys_wm = to_wm.transform(lons_a[mask], lats_a[mask])
-                clipped_xs.extend(xs_wm.tolist())
-                clipped_ys.extend(ys_wm.tolist())
-        x_min_wm = min(clipped_xs) - config.padding_m
-        x_max_wm = max(clipped_xs) + config.padding_m
-        y_min_wm = min(clipped_ys) - config.padding_m
-        y_max_wm = max(clipped_ys) + config.padding_m
-        print(
-            f"Grid from clipped GPS extents (clip radius: {config.track_clip_radius_km} km)"
-        )
-    else:
-        all_lats = np.array([p[0] for _, pts in tracks for p in pts])
-        all_lons = np.array([p[1] for _, pts in tracks for p in pts])
-        xs_wm_all, ys_wm_all = to_wm.transform(all_lons, all_lats)
-        x_min_wm = xs_wm_all.min() - config.padding_m
-        x_max_wm = xs_wm_all.max() + config.padding_m
-        y_min_wm = ys_wm_all.min() - config.padding_m
-        y_max_wm = ys_wm_all.max() + config.padding_m
-        print("Grid from raw GPS extents (no clip radius set)")
-
     grid_w = int((x_max_wm - x_min_wm) / config.meters_per_pixel) + 1
     grid_h = int((y_max_wm - y_min_wm) / config.meters_per_pixel) + 1
-    print(f"Grid: {grid_w} × {grid_h} px at {config.meters_per_pixel} Mercator-m/px")
+    log.info("Grid: %d x %d px at %d Mercator-m/px", grid_w, grid_h, config.meters_per_pixel)
 
-    count_grid = np.zeros((grid_h, grid_w), dtype=np.float32)
-    speed_sum = np.zeros((grid_h, grid_w), dtype=np.float32)
-    speed_n = np.zeros((grid_h, grid_w), dtype=np.float32)
-    hr_sum = np.zeros((grid_h, grid_w), dtype=np.float32)
-    hr_n = np.zeros((grid_h, grid_w), dtype=np.float32)
-    grad_sum = np.zeros((grid_h, grid_w), dtype=np.float32)
-    grad_n = np.zeros((grid_h, grid_w), dtype=np.float32)
-    elev_sum = np.zeros((grid_h, grid_w), dtype=np.float32)
-    elev_n = np.zeros((grid_h, grid_w), dtype=np.float32)
-
-    def _paint_segment(x1, y1, x2, y2, speed_val, hr_val, grad_val, elev_val):
-        dx, dy = x2 - x1, y2 - y1
-        n_steps = max(int(max(abs(dx), abs(dy))) + 1, 1)
-        h, w = speed_sum.shape
-        for i in range(n_steps + 1):
-            t = i / n_steps
-            xi = int(round(x1 + t * dx))
-            yi = int(round(y1 + t * dy))
-            if not (0 <= xi < w and 0 <= yi < h):
-                continue
-            if speed_val is not None:
-                speed_sum[yi, xi] += speed_val
-                speed_n[yi, xi] += 1
-            if hr_val is not None:
-                hr_sum[yi, xi] += hr_val
-                hr_n[yi, xi] += 1
-            if grad_val is not None:
-                grad_sum[yi, xi] += grad_val
-                grad_n[yi, xi] += 1
-            if elev_val is not None:
-                elev_sum[yi, xi] += elev_val
-                elev_n[yi, xi] += 1
+    grids = RasterGrids.empty(grid_w, grid_h, (x_min_wm, x_max_wm, y_min_wm, y_max_wm))
 
     for _label, pts in tracks:
-        lats_a = np.array([p[0] for p in pts])
-        lons_a = np.array([p[1] for p in pts])
-        xs_utm, ys_utm = to_utm.transform(lons_a, lats_a)
-        xs_wm, ys_wm = to_wm.transform(lons_a, lats_a)
+        _paint_track(
+            grids,
+            pts,
+            proj,
+            home_x_utm,
+            home_y_utm,
+            clip_m,
+            config.meters_per_pixel,
+            grid_w,
+            grid_h,
+        )
 
-        if clip_m is not None:
-            mask = (
-                (xs_utm - home_x_utm) ** 2 + (ys_utm - home_y_utm) ** 2
-            ) <= clip_m**2
-            if not mask.any():
-                continue
-            pts = [pts[i] for i in range(len(pts)) if mask[i]]
-            xs_utm = xs_utm[mask]
-            ys_utm = ys_utm[mask]
-            xs_wm = xs_wm[mask]
-            ys_wm = ys_wm[mask]
-
-        px = (xs_wm - x_min_wm) / config.meters_per_pixel
-        py = (y_max_wm - ys_wm) / config.meters_per_pixel
-
-        for i in range(len(pts)):
-            xi = int(round(px[i]))
-            yi = int(round(py[i]))
-            if 0 <= xi < grid_w and 0 <= yi < grid_h:
-                count_grid[yi, xi] += 1
-
-        for i in range(len(pts) - 1):
-            s0, s1 = pts[i][2], pts[i + 1][2]
-            h0, h1 = pts[i][3], pts[i + 1][3]
-            a0, a1 = pts[i][4], pts[i + 1][4]
-
-            seg_speed = (
-                (s0 + s1) / 2
-                if s0 is not None and s1 is not None
-                else (s0 if s0 is not None else s1)
-            )
-            seg_hr = (
-                (h0 + h1) / 2
-                if h0 is not None and h1 is not None
-                else (h0 if h0 is not None else h1)
-            )
-
-            if a0 is not None and a1 is not None:
-                d_dist = math.sqrt(
-                    (xs_utm[i + 1] - xs_utm[i]) ** 2 + (ys_utm[i + 1] - ys_utm[i]) ** 2
-                )
-                if d_dist >= 0.5:
-                    seg_grad = abs(a1 - a0) / d_dist
-                    seg_elev = a1 - a0
-                else:
-                    seg_grad = seg_elev = None
-            else:
-                seg_grad = seg_elev = None
-
-            _paint_segment(
-                px[i],
-                py[i],
-                px[i + 1],
-                py[i + 1],
-                seg_speed,
-                seg_hr,
-                seg_grad,
-                seg_elev,
-            )
-
-    print(
-        f"Count grid — max GPS pts/px: {count_grid.max():.0f}, "
-        f"non-zero: {(count_grid > 0).sum():,}"
+    log.info(
+        "Count grid — max GPS pts/px: %d, non-zero: %s",
+        int(grids.count_grid.max()),
+        f"{int((grids.count_grid > 0).sum()):,}",
     )
-    print(f"Speed data — {(speed_n > 0).sum():,} pixels")
-    print(f"HR data    — {(hr_n > 0).sum():,} pixels")
-    print(f"Gradient   — {(grad_n > 0).sum():,} pixels")
-    print(f"Elev change — {(elev_n > 0).sum():,} pixels")
-
-    return RasterGrids(
-        count_grid=count_grid,
-        speed_sum=speed_sum,
-        speed_n=speed_n,
-        hr_sum=hr_sum,
-        hr_n=hr_n,
-        grad_sum=grad_sum,
-        grad_n=grad_n,
-        elev_sum=elev_sum,
-        elev_n=elev_n,
-        x_min_wm=x_min_wm,
-        x_max_wm=x_max_wm,
-        y_min_wm=y_min_wm,
-        y_max_wm=y_max_wm,
-    )
+    log.info("Speed data — %s pixels", f"{int((grids.speed_n > 0).sum()):,}")
+    log.info("HR data    — %s pixels", f"{int((grids.hr_n > 0).sum()):,}")
+    log.info("Gradient   — %s pixels", f"{int((grids.grad_n > 0).sum()):,}")
+    log.info("Elev change— %s pixels", f"{int((grids.elev_n > 0).sum()):,}")
+    return grids
 
 
-def _presence_alpha(grid: np.ndarray, blur_sigma: int, pct: int = 10) -> np.ndarray:
+# --------------------------------------------------------------------------- #
+# Normalisation
+# --------------------------------------------------------------------------- #
+
+
+def _presence_alpha(grid: np.ndarray, blur_sigma: int) -> np.ndarray:
     binary = (grid > 0).astype(np.float32)
     blurred = gaussian_filter(binary, sigma=blur_sigma)
     present = blurred[binary > 0]
-    sat = np.percentile(present, pct) if present.size else 0
+    sat = float(np.percentile(present, PRESENCE_PCT)) if present.size else 0.0
     return np.clip(blurred / sat, 0, 1) if sat > 0 else blurred
 
 
+def _autorange(values: np.ndarray, pct: int) -> tuple[float, float]:
+    return float(np.percentile(values, pct)), float(np.percentile(values, 100 - pct))
+
+
+def _mean(value_sum: np.ndarray, n: np.ndarray) -> np.ndarray:
+    return np.where(n > 0, value_sum / n, 0)
+
+
+def _normalize_count(count_grid: np.ndarray, sigma: int) -> tuple[np.ndarray, np.ndarray, float]:
+    b_count = gaussian_filter(count_grid, sigma=sigma)
+    return b_count / b_count.max(), np.log1p(b_count) / np.log1p(b_count.max()), float(count_grid.max())
+
+
+def _normalize_speed(
+    speed_sum: np.ndarray,
+    speed_n: np.ndarray,
+    sigma: int,
+    lo: float | None,
+    hi: float | None,
+    pct: int,
+) -> tuple[np.ndarray, tuple[float, float]]:
+    b_sum = gaussian_filter(speed_sum, sigma=sigma)
+    b_n = gaussian_filter(speed_n, sigma=sigma)
+    mean = _mean(b_sum, b_n)
+    visited = mean[b_n > 0.01]
+
+    if not visited.size:
+        log.info("Pace: no speed data")
+        return np.zeros_like(mean), (1.0, 5.0)
+
+    auto_lo, auto_hi = _autorange(visited, pct)
+    s_lo = lo if lo is not None else auto_lo
+    s_hi = hi if hi is not None else auto_hi
+
+    norm = np.clip((mean - s_lo) / (s_hi - s_lo), 0, 1)
+    norm = np.where(b_n > 0, norm, 0)
+    # Re-blur to soften hard edges between visited / unvisited pixels
+    weight = (b_n > 0.01).astype(float)
+    norm = np.where(
+        gaussian_filter(weight, sigma=sigma) > 0,
+        gaussian_filter(norm * weight, sigma=sigma) / np.maximum(gaussian_filter(weight, sigma=sigma), 1e-9),
+        0,
+    )
+    log.info(
+        "Pace range: %.2f-%.2f m/s  ≈ %d-%d sec/km",
+        s_lo,
+        s_hi,
+        1000 / s_hi,
+        1000 / s_lo,
+    )
+    return norm, (s_lo, s_hi)
+
+
+def _normalize_hr(
+    hr_sum: np.ndarray,
+    hr_n: np.ndarray,
+    sigma: int,
+    lo: float | None,
+    hi: float | None,
+    pct: int,
+) -> tuple[np.ndarray, tuple[float, float]]:
+    b_sum = gaussian_filter(hr_sum, sigma=sigma)
+    b_n = gaussian_filter(hr_n, sigma=sigma)
+    mean = _mean(b_sum, b_n)
+    # NB: gating on raw hr_n (not blurred) here matches original behavior
+    visited = mean[hr_n > 0]
+
+    if not visited.size:
+        log.info("HR: no heart rate data")
+        return np.zeros_like(mean), (100.0, 180.0)
+
+    auto_lo, auto_hi = _autorange(visited, pct)
+    h_lo = lo if lo is not None else auto_lo
+    h_hi = hi if hi is not None else auto_hi
+
+    norm = np.clip((mean - h_lo) / (h_hi - h_lo), 0, 1)
+    norm = np.where(b_n > 0, norm, 0)
+    weight = (hr_n > 0).astype(float)
+    blurred_weight = gaussian_filter(weight, sigma=sigma)
+    norm = np.where(
+        blurred_weight > 0,
+        gaussian_filter(norm * weight, sigma=sigma) / np.maximum(blurred_weight, 1e-9),
+        0,
+    )
+    log.info("HR range: %.0f-%.0f bpm", h_lo, h_hi)
+    return norm, (h_lo, h_hi)
+
+
+def _normalize_gradient(
+    grad_sum: np.ndarray,
+    grad_n: np.ndarray,
+    raw_n: np.ndarray,
+    sigma: int,
+    pct: int,
+) -> tuple[np.ndarray, tuple[float, float]]:
+    b_sum = gaussian_filter(grad_sum, sigma=sigma)
+    b_n = gaussian_filter(grad_n, sigma=sigma)
+    mean = _mean(b_sum, b_n)
+    visited = mean[b_n > 0.01]
+
+    if not (raw_n > 0).any() or not visited.size:
+        log.info("Gradient: no altitude data")
+        return np.zeros_like(mean), (0.0, 0.0)
+
+    g_lo, g_hi = _autorange(visited, pct)
+    norm = np.where(b_n > 0, np.clip((mean - g_lo) / (g_hi - g_lo), 0, 1), 0)
+    log.info("Gradient: %.1f%%-%.1f%%", g_lo * 100, g_hi * 100)
+    return norm, (g_lo, g_hi)
+
+
+def _normalize_elev(
+    elev_sum: np.ndarray,
+    elev_n: np.ndarray,
+    raw_n: np.ndarray,
+    sigma: int,
+    pct: int,
+) -> np.ndarray:
+    b_sum = gaussian_filter(elev_sum, sigma=sigma)
+    b_n = gaussian_filter(elev_n, sigma=sigma)
+    mean = _mean(b_sum, b_n)
+
+    if not (raw_n > 0).any():
+        log.info("Elev change: no altitude data")
+        return np.zeros_like(mean)
+
+    visited = mean[b_n > 0.01]
+    abs_hi = max(
+        abs(float(np.percentile(visited, pct))),
+        abs(float(np.percentile(visited, 100 - pct))),
+    )
+    norm = np.clip(mean / abs_hi, -1, 1)
+    norm = np.where(b_n > 0, norm, 0)
+    weight = (b_n > 0.01).astype(float)
+    blurred_weight = gaussian_filter(weight, sigma=sigma)
+    norm = np.where(
+        blurred_weight > 0,
+        gaussian_filter(norm * weight, sigma=sigma) / np.maximum(blurred_weight, 1e-9),
+        0,
+    )
+    log.info("Elev change: ±%.1f%%", abs_hi * 100)
+    return norm
+
+
 def blur_and_normalize(grids: RasterGrids, config: Config) -> NormalizedLayers:
-    """Gaussian blur + per-channel normalisation. Returns scale metadata for legend."""
     sigma = config.blur_sigma_px
     pct = config.auto_range_pct
 
-    # Frequency
-    b_count = gaussian_filter(grids.count_grid, sigma=sigma)
-    count_norm = b_count / b_count.max()
-    count_log_norm = np.log1p(b_count) / np.log1p(b_count.max())
+    count_norm, count_log_norm, count_max = _normalize_count(grids.count_grid, sigma)
+    speed_norm, speed_range = _normalize_speed(
+        grids.speed_sum,
+        grids.speed_n,
+        sigma,
+        config.speed_min_ms,
+        config.speed_max_ms,
+        pct,
+    )
+    hr_norm, hr_range = _normalize_hr(
+        grids.hr_sum,
+        grids.hr_n,
+        sigma,
+        config.hr_min_bpm,
+        config.hr_max_bpm,
+        pct,
+    )
+    grad_norm, grad_range = _normalize_gradient(
+        grids.grad_sum,
+        grids.grad_n,
+        grids.grad_n,
+        sigma,
+        pct,
+    )
+    elev_norm = _normalize_elev(grids.elev_sum, grids.elev_n, grids.elev_n, sigma, pct)
 
-    # Pace (speed)
-    b_speed_sum = gaussian_filter(grids.speed_sum, sigma=sigma)
-    b_speed_n = gaussian_filter(grids.speed_n, sigma=sigma)
-    mean_speed = np.where(b_speed_n > 0, b_speed_sum / b_speed_n, 0)
-    visited_speeds = mean_speed[b_speed_n > 0.01]
-    if visited_speeds.size:
-        s_lo = (
-            config.speed_min_ms
-            if config.speed_min_ms is not None
-            else float(np.percentile(visited_speeds, pct))
-        )
-        s_hi = (
-            config.speed_max_ms
-            if config.speed_max_ms is not None
-            else float(np.percentile(visited_speeds, 100 - pct))
-        )
-        speed_norm = np.clip((mean_speed - s_lo) / (s_hi - s_lo), 0, 1)
-        speed_norm = np.where(b_speed_n > 0, speed_norm, 0)
-        _sw = gaussian_filter(
-            speed_norm * (b_speed_n > 0.01).astype(float), sigma=sigma
-        )
-        _sn = gaussian_filter((b_speed_n > 0.01).astype(float), sigma=sigma)
-        speed_norm = np.where(_sn > 0, _sw / _sn, 0)
-        print(
-            f"Pace range: {s_lo:.2f}–{s_hi:.2f} m/s  ≈ {1000 / s_hi:.0f}–{1000 / s_lo:.0f} sec/km"
-        )
-    else:
-        s_lo, s_hi = 1.0, 5.0
-        speed_norm = np.zeros_like(mean_speed)
-        print("Pace: no speed data")
-
-    # Heart rate
-    b_hr_sum = gaussian_filter(grids.hr_sum, sigma=sigma)
-    b_hr_n = gaussian_filter(grids.hr_n, sigma=sigma)
-    mean_hr = np.where(b_hr_n > 0, b_hr_sum / b_hr_n, 0)
-    visited_hrs = mean_hr[grids.hr_n > 0]
-    if visited_hrs.size:
-        hr_lo = (
-            config.hr_min_bpm
-            if config.hr_min_bpm is not None
-            else float(np.percentile(visited_hrs, pct))
-        )
-        hr_hi = (
-            config.hr_max_bpm
-            if config.hr_max_bpm is not None
-            else float(np.percentile(visited_hrs, 100 - pct))
-        )
-        hr_norm = np.clip((mean_hr - hr_lo) / (hr_hi - hr_lo), 0, 1)
-        hr_norm = np.where(b_hr_n > 0, hr_norm, 0)
-        _hw = gaussian_filter(hr_norm * (grids.hr_n > 0).astype(float), sigma=sigma)
-        _hn = gaussian_filter((grids.hr_n > 0).astype(float), sigma=sigma)
-        hr_norm = np.where(_hn > 0, _hw / _hn, 0)
-        print(f"HR range: {hr_lo:.0f}–{hr_hi:.0f} bpm")
-    else:
-        hr_lo, hr_hi = 100.0, 180.0
-        hr_norm = np.zeros_like(mean_hr)
-        print("HR: no heart rate data")
-
-    # Gradient (absolute)
-    b_grad_sum = gaussian_filter(grids.grad_sum, sigma=sigma)
-    b_grad_n = gaussian_filter(grids.grad_n, sigma=sigma)
-    mean_grad = np.where(b_grad_n > 0, b_grad_sum / b_grad_n, 0)
-    visited_grads = mean_grad[b_grad_n > 0.01]
-    n_grad_px = int((grids.grad_n > 0).sum())
-    if n_grad_px and visited_grads.size:
-        g_lo = float(np.percentile(visited_grads, pct))
-        g_hi = float(np.percentile(visited_grads, 100 - pct))
-        grad_norm = np.clip((mean_grad - g_lo) / (g_hi - g_lo), 0, 1)
-        grad_norm = np.where(b_grad_n > 0, grad_norm, 0)
-        print(f"Gradient: {g_lo * 100:.1f}%–{g_hi * 100:.1f}%")
-    else:
-        grad_norm = np.zeros_like(mean_grad)
-        g_lo = g_hi = 0.0
-        print("Gradient: no altitude data")
-
-    # Gradient (signed elevation change)
-    b_elev_sum = gaussian_filter(grids.elev_sum, sigma=sigma)
-    b_elev_n = gaussian_filter(grids.elev_n, sigma=sigma)
-    mean_elev = np.where(b_elev_n > 0, b_elev_sum / b_elev_n, 0)
-    n_elev_px = int((grids.elev_n > 0).sum())
-    if n_elev_px:
-        visited_elevs = mean_elev[b_elev_n > 0.01]
-        e_abs_hi = max(
-            abs(float(np.percentile(visited_elevs, pct))),
-            abs(float(np.percentile(visited_elevs, 100 - pct))),
-        )
-        elev_norm = np.clip(mean_elev / e_abs_hi, -1, 1)
-        elev_norm = np.where(b_elev_n > 0, elev_norm, 0)
-        _ew = gaussian_filter(elev_norm * (b_elev_n > 0.01).astype(float), sigma=sigma)
-        _en = gaussian_filter((b_elev_n > 0.01).astype(float), sigma=sigma)
-        elev_norm = np.where(_en > 0, _ew / _en, 0)
-        print(f"Elev change: ±{e_abs_hi * 100:.1f}%")
-    else:
-        elev_norm = np.zeros_like(mean_elev)
-        print("Elev change: no altitude data")
-
-    # Alpha masks
     alpha_speed = _presence_alpha(grids.speed_n, sigma)
     alpha_hr = _presence_alpha(grids.hr_n, sigma)
-    _pg = (
-        _presence_alpha(grids.grad_n, sigma) if n_grad_px else np.zeros_like(grad_norm)
+    alpha_grad = (
+        _presence_alpha(grids.grad_n, sigma) * (0.15 + 0.85 * grad_norm)
+        if (grids.grad_n > 0).any()
+        else np.zeros_like(grad_norm)
     )
-    alpha_grad = _pg * (0.15 + 0.85 * grad_norm)
-    alpha_elev = (
-        _presence_alpha(grids.elev_n, sigma) if n_elev_px else np.zeros_like(elev_norm)
-    )
+    alpha_elev = _presence_alpha(grids.elev_n, sigma) if (grids.elev_n > 0).any() else np.zeros_like(elev_norm)
 
     return NormalizedLayers(
         count_norm=count_norm,
@@ -370,8 +509,8 @@ def blur_and_normalize(grids: RasterGrids, config: Config) -> NormalizedLayers:
         alpha_grad=alpha_grad,
         elev_norm=elev_norm,
         alpha_elev=alpha_elev,
-        speed_range=(s_lo, s_hi),
-        hr_range=(hr_lo, hr_hi),
-        grad_range=(g_lo, g_hi),
-        count_max=float(grids.count_grid.max()),
+        speed_range=speed_range,
+        hr_range=hr_range,
+        grad_range=grad_range,
+        count_max=count_max,
     )

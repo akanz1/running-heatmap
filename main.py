@@ -1,8 +1,11 @@
+import logging
+
+from heatmap import configure_logging
 from heatmap import run
 from heatmap.config import Config
 
 config = Config(
-    # activities_dir=None,        # auto-detect: ./strava_export or ~/Downloads/strava_export
+    # activities_dir=None,        # None = <project_root>/strava_export
     # activity_types=["Run"],
     date_from="2026-01-01",
     # date_to=None,               # None = today
@@ -14,4 +17,5 @@ config = Config(
 )
 
 if __name__ == "__main__":
+    configure_logging(level=logging.INFO)
     run(config)

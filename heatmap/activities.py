@@ -1,47 +1,47 @@
 from __future__ import annotations
 
+import gzip
 import json
+import logging
 import math
 from datetime import date
-from pathlib import Path
+from typing import TYPE_CHECKING
 
+import fitparse
 import pandas as pd
 
-from heatmap.config import Config
 from heatmap.constants import EARTH_RADIUS_KM
 from heatmap.constants import SEMICIRCLE_TO_DEG
+from heatmap.localization import normalize
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from heatmap.config import Config
+
+log = logging.getLogger(__name__)
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
 
 
 def _get_gps_start(filepath: Path) -> tuple[float | None, float | None, float | None]:
-    import gzip
-
-    import fitparse
-
+    """Return (start_lat, start_lon, spread_m) from a .fit.gz, or (None, None, None)."""
     lats, lons = [], []
     try:
         with gzip.open(filepath, "rb") as f:
             for msg in fitparse.FitFile(f).get_messages("record"):
                 d = {x.name: x.value for x in msg}
-                if (
-                    d.get("position_lat") is not None
-                    and d.get("position_long") is not None
-                ):
-                    lats.append(d["position_lat"] * SEMICIRCLE_TO_DEG)
-                    lons.append(d["position_long"] * SEMICIRCLE_TO_DEG)
-    except Exception:
-        pass
+                if d.get("position_lat") is None or d.get("position_long") is None:
+                    continue
+                lats.append(d["position_lat"] * SEMICIRCLE_TO_DEG)
+                lons.append(d["position_long"] * SEMICIRCLE_TO_DEG)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Failed to read GPS start from %s: %s", filepath, e)
 
     if not lats:
         return None, None, None
@@ -58,7 +58,7 @@ def _detect_home(runs: pd.DataFrame) -> tuple[float, float, int]:
     """Bin start points to a ~1 km grid, return mean coords of the densest cell."""
     cell_lats: dict = {}
     cell_lons: dict = {}
-    for lat, lon in zip(runs["start_lat"], runs["start_lon"]):
+    for lat, lon in zip(runs["start_lat"], runs["start_lon"], strict=False):
         cell = (round(lat, 2), round(lon, 2))
         cell_lats.setdefault(cell, []).append(lat)
         cell_lons.setdefault(cell, []).append(lon)
@@ -68,68 +68,85 @@ def _detect_home(runs: pd.DataFrame) -> tuple[float, float, int]:
     return home_lat, home_lon, len(cell_lats[best])
 
 
-def load_and_filter(config: Config) -> tuple[pd.DataFrame, float, float, str]:
+def _load_csv(activities_dir: Path) -> pd.DataFrame:
+    df = pd.read_csv(activities_dir / "activities.csv")
+    df = normalize(df)
+    df["Activity Date"] = pd.to_datetime(df["Activity Date"], format="mixed", dayfirst=True)
+    return df
+
+
+def _filter_by_type_and_date(
+    df: pd.DataFrame, activity_types: list[str], date_from: str | None, date_to: str | None
+) -> pd.DataFrame:
+    runs = df[df["Activity Type"].isin(activity_types)].copy()
+    log.info("Total matching activities in export: %d", len(runs))
+
+    d_from = pd.Timestamp(date_from) if date_from else pd.Timestamp.min
+    d_to = pd.Timestamp(date_to) if date_to else pd.Timestamp(date.today())
+    runs = runs[runs["Activity Date"].between(d_from, d_to)].copy()
+    log.info("After date filter (%s - %s): %d", d_from.date(), d_to.date(), len(runs))
+    return runs
+
+
+def _resolve_gps_starts(runs: pd.DataFrame, activities_dir: Path) -> pd.DataFrame:
+    """Augment each row with start_lat / start_lon / gps_spread_m. Disk-cached per export."""
+    cache_path = activities_dir / "_gps_cache.json"
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+
+    rows = []
+    for _, row in runs.iterrows():
+        fn = str(row["Filename"])
+        if fn not in cache:
+            cache[fn] = list(_get_gps_start(activities_dir / fn))
+        lat, lon, spread = cache[fn]
+        rows.append({**row, "start_lat": lat, "start_lon": lon, "gps_spread_m": spread})
+
+    cache_path.write_text(json.dumps(cache))
+    return pd.DataFrame(rows)
+
+
+def _resolve_home(runs: pd.DataFrame, config: Config) -> tuple[float, float]:
+    if config.home_lat is not None and config.home_lon is not None:
+        log.info("Using manual home: %s, %s", config.home_lat, config.home_lon)
+        return config.home_lat, config.home_lon
+
+    home_lat, home_lon, n_home = _detect_home(runs)
+    log.info(
+        "Auto-detected home: %.4f, %.4f (%d of %d activities started there)",
+        home_lat,
+        home_lon,
+        n_home,
+        len(runs),
+    )
+    return home_lat, home_lon
+
+
+def _filter_by_home_radius(runs: pd.DataFrame, home_lat: float, home_lon: float, radius_km: float) -> pd.DataFrame:
+    runs["dist_from_home_km"] = runs.apply(
+        lambda r: haversine_km(home_lat, home_lon, r["start_lat"], r["start_lon"]),
+        axis=1,
+    )
+    filtered = runs[runs["dist_from_home_km"] <= radius_km].copy()
+    log.info("After home-radius filter (≤%s km): %d activities", radius_km, len(filtered))
+    return filtered
+
+
+def load_and_filter(config: Config) -> tuple[pd.DataFrame, float, float, Path]:
     """Load activities CSV, filter by type/date/home radius.
 
     Returns (filtered_runs, home_lat, home_lon, activities_dir).
     """
     activities_dir = config.resolved_activities_dir()
-    print(f"Source:  {activities_dir}/")
+    log.info("Source: %s", activities_dir)
 
-    df = pd.read_csv(Path(activities_dir) / "activities.csv")
-    df["Activity Date"] = pd.to_datetime(
-        df["Activity Date"], format="mixed", dayfirst=True
-    )
+    df = _load_csv(activities_dir)
+    runs = _filter_by_type_and_date(df, config.activity_types, config.date_from, config.date_to)
+    runs = _resolve_gps_starts(runs, activities_dir)
 
-    runs = df[df["Activity Type"].isin(config.activity_types)].copy()
-    print(f"Total matching activities in export: {len(runs)}")
+    runs = runs[runs["start_lat"].notna() & (runs["gps_spread_m"] >= config.gps_spread_min_m)].copy()
+    log.info("After removing no-GPS / indoor: %d", len(runs))
 
-    date_from = pd.Timestamp(config.date_from) if config.date_from else pd.Timestamp.min
-    date_to = (
-        pd.Timestamp(config.date_to) if config.date_to else pd.Timestamp(date.today())
-    )
-    runs = runs[runs["Activity Date"].between(date_from, date_to)].copy()
-    print(f"After date filter ({date_from.date()} – {date_to.date()}): {len(runs)}")
-
-    # Resolve GPS start points (cached per export folder)
-    gps_cache_path = Path(activities_dir) / "_gps_cache.json"
-    gps_cache = (
-        json.loads(gps_cache_path.read_text()) if gps_cache_path.exists() else {}
-    )
-
-    rows = []
-    for _, row in runs.iterrows():
-        fn = str(row["Filename"])
-        if fn in gps_cache:
-            lat, lon, spread = gps_cache[fn]
-        else:
-            lat, lon, spread = _get_gps_start(Path(activities_dir) / fn)
-            gps_cache[fn] = [lat, lon, spread]
-        rows.append({**row, "start_lat": lat, "start_lon": lon, "gps_spread_m": spread})
-
-    gps_cache_path.write_text(json.dumps(gps_cache))
-
-    runs = pd.DataFrame(rows)
-    runs = runs[
-        runs["start_lat"].notna() & (runs["gps_spread_m"] >= config.gps_spread_min_m)
-    ].copy()
-    print(f"After removing no-GPS / indoor: {len(runs)}")
-
-    if config.home_lat is None or config.home_lon is None:
-        home_lat, home_lon, n_home = _detect_home(runs)
-        print(
-            f"Auto-detected home: {home_lat:.4f}, {home_lon:.4f}  "
-            f"({n_home} of {len(runs)} activities started there)"
-        )
-    else:
-        home_lat, home_lon = config.home_lat, config.home_lon
-        print(f"Using manual home: {home_lat}, {home_lon}")
-
-    runs["dist_from_home_km"] = runs.apply(
-        lambda r: haversine_km(home_lat, home_lon, r["start_lat"], r["start_lon"]),
-        axis=1,
-    )
-    runs = runs[runs["dist_from_home_km"] <= config.radius_km].copy()
-    print(f"After home-radius filter (≤{config.radius_km} km): {len(runs)} activities")
+    home_lat, home_lon = _resolve_home(runs, config)
+    runs = _filter_by_home_radius(runs, home_lat, home_lon, config.radius_km)
 
     return runs, home_lat, home_lon, activities_dir
