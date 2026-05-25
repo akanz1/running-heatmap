@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import date
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from heatmap.colormaps import CMAP_COUNT
 from heatmap.colormaps import CMAP_ELEV
 from heatmap.colormaps import CMAP_HR
+from heatmap.colormaps import CMAP_RECENCY
 from heatmap.colormaps import CMAP_SPEED
 from heatmap.format import pace_min_per_km
+
+_EPOCH = date(1970, 1, 1)
 
 if TYPE_CHECKING:
     import matplotlib.colors as mcolors
@@ -37,20 +42,28 @@ def _row(row_id: str, title: str, grad_css: str, label_lo: str, label_hi: str, v
     </div>"""
 
 
-def build_legend_html(
+def build_legend_html(  # noqa: PLR0913
     speed_range: tuple[float, float],
     hr_range: tuple[float, float],
     grad_range: tuple[float, float],
     count_max: float,
+    date_range_days: tuple[float, float],
+    recent_count_max: float,
 ) -> str:
     s_lo, s_hi = speed_range
     hr_lo, hr_hi = hr_range
     g_lo, g_hi = grad_range
+    d_lo, d_hi = date_range_days
     count_max_int = int(count_max)
+    recent_count_max_int = max(1, int(recent_count_max))
+
+    date_lo_str = (_EPOCH + timedelta(days=int(d_lo))).isoformat() if d_lo > 0 else "—"
+    date_hi_str = (_EPOCH + timedelta(days=int(d_hi))).isoformat() if d_hi > 0 else "—"
 
     freq_css = _cmap_to_css(CMAP_COUNT)
     pace_css = _cmap_to_css(CMAP_SPEED)
     hr_css = _cmap_to_css(CMAP_HR)
+    recency_css = _cmap_to_css(CMAP_RECENCY)
 
     return f"""
 <div id="heatmap-legend" style="
@@ -63,7 +76,16 @@ def build_legend_html(
     box-shadow:0 2px 8px rgba(0,0,0,0.6);
 ">
   {_row("legend-frequency", "Frequency (linear)", freq_css, "1 pass", f"{count_max_int} passes")}
-  {_row("legend-frequency-log", "Frequency (log)", freq_css, "1 pass", f"{count_max_int} passes (log scale)", visible=True)}
+  {
+        _row(
+            "legend-frequency-log",
+            "Frequency (log)",
+            freq_css,
+            "1 pass",
+            f"{count_max_int} passes (log scale)",
+            visible=True,
+        )
+    }
   {_row("legend-pace-avg", "Pace (average)", pace_css, pace_min_per_km(s_lo), pace_min_per_km(s_hi))}
   {_row("legend-heart-rate-avg", "Heart rate (average)", hr_css, f"{hr_lo:.0f} bpm", f"{hr_hi:.0f} bpm")}
   {
@@ -76,5 +98,7 @@ def build_legend_html(
         )
     }
   {_row("legend-elev-change", "Gradient (change)", _cmap_to_css(CMAP_ELEV), "descending", "ascending")}
+  {_row("legend-recency", "Recency (most recent visit)", recency_css, date_lo_str, date_hi_str)}
+  {_row("legend-freshness", "Freshness (visits, last 12 mo)", freq_css, "1", f"{recent_count_max_int} (log)")}
 </div>
 """

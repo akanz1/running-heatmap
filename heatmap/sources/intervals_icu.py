@@ -196,6 +196,7 @@ def load(cache_dir: Path) -> pd.DataFrame:
                 "name": e.get("name") or "",
                 "distance_m": e.get("distance"),
                 "moving_time_s": e.get("moving_time"),
+                "elevation_gain_m": e.get("total_elevation_gain"),
                 "file_path": fit_path,
                 "start_lat": None,
                 "start_lon": None,

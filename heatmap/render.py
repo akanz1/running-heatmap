@@ -31,9 +31,11 @@ import folium
 from heatmap.assets import EXCLUSIVE_OVERLAY_JS
 from heatmap.assets import LAYER_CONTROL_CSS
 from heatmap.legend import build_legend_html
+from heatmap.stats_panel import build_stats_panel_html
 
 if TYPE_CHECKING:
     from heatmap.config import Config
+    from heatmap.stats_panel import StatsPanelData
     from heatmap.tiles import PyramidResult
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,8 @@ _LAYER_SPEC: list[tuple[str, str, bool]] = [
     ("Heart rate (average)", "hr", False),
     ("Gradient (absolute)", "grad", False),
     ("Gradient (change)", "elev", False),
+    ("Recency", "recency", False),
+    ("Freshness (last 12 mo)", "freshness", False),
 ]
 
 
@@ -109,6 +113,7 @@ def _add_raster_tilelayers(
 def build_and_save(
     pyramid: PyramidResult,
     config: Config,
+    stats_data: StatsPanelData | None = None,
 ) -> str:
     """Assemble the Folium map with TileLayers, save HTML. Returns output path."""
     bounds = pyramid.bounds_latlon
@@ -140,10 +145,15 @@ def build_and_save(
                 hr_range=pyramid.hr_range,
                 grad_range=pyramid.grad_range,
                 count_max=pyramid.count_max,
+                date_range_days=pyramid.date_range_days,
+                recent_count_max=pyramid.recent_count_max,
             )
         )
     )
     m.get_root().html.add_child(folium.Element(EXCLUSIVE_OVERLAY_JS))
+
+    if stats_data is not None:
+        m.get_root().html.add_child(folium.Element(build_stats_panel_html(stats_data)))
 
     output_path = config.output_html_path()
     output_path.parent.mkdir(exist_ok=True)

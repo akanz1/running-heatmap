@@ -2,6 +2,7 @@
 
 Kept as string constants so render.py stays focused on assembly.
 """
+
 from __future__ import annotations
 
 LAYER_CONTROL_CSS = """
@@ -44,12 +45,14 @@ EXCLUSIVE_OVERLAY_JS = """
 <script>
 (function() {
     var legendIds = {
-        "Frequency (linear)":   "legend-frequency",
-        "Frequency (log)":      "legend-frequency-log",
-        "Pace (average)":       "legend-pace-avg",
-        "Heart rate (average)": "legend-heart-rate-avg",
-        "Gradient (absolute)":  "legend-gradient",
-        "Gradient (change)":    "legend-elev-change"
+        "Frequency (linear)":       "legend-frequency",
+        "Frequency (log)":          "legend-frequency-log",
+        "Pace (average)":           "legend-pace-avg",
+        "Heart rate (average)":     "legend-heart-rate-avg",
+        "Gradient (absolute)":      "legend-gradient",
+        "Gradient (change)":        "legend-elev-change",
+        "Recency":                  "legend-recency",
+        "Freshness (last 12 mo)":   "legend-freshness"
     };
     function showLegend(activeName) {
         Object.keys(legendIds).forEach(function(name) {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
 from tqdm import tqdm
@@ -21,6 +23,18 @@ TRACK_POINT_FIELDS = 5
 # Extensions that used to be cached without speed (pre-derived-speed upgrade).
 # These get cleared so they re-parse with timestamps → speed.
 _XML_TRACK_EXTS = (".gpx", ".gpx.gz", ".tcx", ".tcx.gz")
+
+_EPOCH = date(1970, 1, 1)
+
+
+@dataclass
+class Track:
+    label: str
+    date_days: int  # days since 1970-01-01, for per-pixel max-date tiles
+    distance_m: float | None
+    moving_time_s: float | None
+    elevation_gain_m: float | None
+    points: list[list]
 
 
 def _is_pre_speed_xml(fn: str, pts: list[list]) -> bool:
@@ -67,31 +81,41 @@ def _load_cache(cache_path: Path) -> dict:
 def load_tracks(
     runs: pd.DataFrame,
     cache_path: Path,
-) -> list[tuple[str, list[list]]]:
+) -> list[Track]:
     """Parse track files (FIT / GPX / TCX) with disk caching.
 
     Reads each row's absolute `file_path`. Cache is keyed by file basename
     so the same cache works for strava_export + intervals.icu sources.
 
-    Returns list of (label, [[lat, lon, speed, hr, alt], ...]).
+    Returns Track objects carrying activity metadata alongside the points.
     """
     cache_path.parent.mkdir(exist_ok=True)
     cache = _load_cache(cache_path)
 
-    tracks: list[tuple[str, list[list]]] = []
+    tracks: list[Track] = []
     for _, row in tqdm(runs.iterrows(), total=len(runs), desc="Loading tracks", unit="run"):
         fp = row["file_path"]
         key = fp.name
-        label = f"{row['date'].date()} {row['name']}"
 
         if key not in cache:
             cache[key] = parse_track(fp)
 
-        if cache[key]:
-            tracks.append((label, cache[key]))
+        if not cache[key]:
+            continue
+
+        tracks.append(
+            Track(
+                label=f"{row['date'].date()} {row['name']}",
+                date_days=(row["date"].date() - _EPOCH).days,
+                distance_m=row.get("distance_m"),
+                moving_time_s=row.get("moving_time_s"),
+                elevation_gain_m=row.get("elevation_gain_m"),
+                points=cache[key],
+            )
+        )
 
     cache_path.write_text(json.dumps(cache))
 
-    total_pts = sum(len(pts) for _, pts in tracks)
+    total_pts = sum(len(t.points) for t in tracks)
     log.info("Loaded %d tracks, %s GPS points", len(tracks), f"{total_pts:,}")
     return tracks

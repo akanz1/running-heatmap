@@ -73,6 +73,7 @@ def load(strava_dir: Path) -> pd.DataFrame:
     out["name"] = raw["Activity Name"].fillna("")
     out["distance_m"] = pd.to_numeric(raw.get("Distance"), errors="coerce")
     out["moving_time_s"] = pd.to_numeric(raw.get("Moving Time"), errors="coerce")
+    out["elevation_gain_m"] = pd.to_numeric(raw.get("Elevation Gain"), errors="coerce")
     out["file_path"] = [strava_dir / fn for fn in raw["Filename"]]
     out["Filename"] = raw["Filename"].to_numpy()  # transient: used by GPS cache key
 

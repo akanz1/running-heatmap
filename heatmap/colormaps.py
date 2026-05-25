@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import matplotlib.colors as mcolors
+from matplotlib import colormaps as _mpl_cmaps
 
 from heatmap.constants import CMAP_COUNT_NODES
 from heatmap.constants import CMAP_ELEV_NODES
@@ -22,3 +23,5 @@ CMAP_COUNT = build_cmap("count", CMAP_COUNT_NODES)
 CMAP_SPEED = build_cmap("speed", CMAP_SPEED_NODES)
 CMAP_HR = build_cmap("hr", CMAP_HR_NODES)
 CMAP_ELEV = build_cmap("elev", CMAP_ELEV_NODES)
+# Recency: matplotlib's viridis (dark blue = old → yellow = recent)
+CMAP_RECENCY = _mpl_cmaps["viridis"]

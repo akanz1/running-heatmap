@@ -12,9 +12,13 @@ from heatmap.config import Config
 from heatmap.constants import EARTH_RADIUS_KM
 from heatmap.render import build_and_save
 from heatmap.sources import intervals_icu
+from heatmap.stats_panel import load_stats_panel_data
+from heatmap.stats_panel import save_stats_panel_data
+from heatmap.stats_panel import stats_panel_data_from_tracks
 from heatmap.tiles import build_pyramid
 from heatmap.tiles import load_pyramid_metadata
 from heatmap.tracks import load_tracks
+from heatmap.tracks import Track
 
 warnings.filterwarnings("ignore")
 
@@ -80,29 +84,34 @@ def _confirm_full_rebuild(n_new: int) -> bool:
 
 
 def _clip_tracks(
-    tracks: list[tuple[str, list[list]]],
+    tracks: list[Track],
     home_lat: float,
     home_lon: float,
     clip_m: float,
-) -> list[tuple[str, list[list]]]:
+) -> list[Track]:
     """Drop GPS points further than clip_m metres from home. Empty tracks removed."""
-    clipped: list[tuple[str, list[list]]] = []
+    clipped: list[Track] = []
     home_lat_r = np.radians(home_lat)
-    for label, pts in tracks:
-        lats = np.array([p[0] for p in pts])
-        lons = np.array([p[1] for p in pts])
+    for t in tracks:
+        lats = np.array([p[0] for p in t.points])
+        lons = np.array([p[1] for p in t.points])
         dlat = np.radians(lats - home_lat)
         dlon = np.radians(lons - home_lon)
-        a = (
-            np.sin(dlat / 2) ** 2
-            + np.cos(home_lat_r) * np.cos(np.radians(lats)) * np.sin(dlon / 2) ** 2
-        )
+        a = np.sin(dlat / 2) ** 2 + np.cos(home_lat_r) * np.cos(np.radians(lats)) * np.sin(dlon / 2) ** 2
         dists = EARTH_RADIUS_KM * 1000 * 2 * np.arcsin(np.sqrt(a))
         mask = dists <= clip_m
         if mask.any():
-            clipped.append((label, [pts[i] for i in range(len(pts)) if mask[i]]))
-    log.info("Clipped tracks within %.1f km of home: %d → %d tracks",
-             clip_m / 1000, len(tracks), len(clipped))
+            clipped.append(
+                Track(
+                    label=t.label,
+                    date_days=t.date_days,
+                    distance_m=t.distance_m,
+                    moving_time_s=t.moving_time_s,
+                    elevation_gain_m=t.elevation_gain_m,
+                    points=[t.points[i] for i in range(len(t.points)) if mask[i]],
+                )
+            )
+    log.info("Clipped tracks within %.1f km of home: %d → %d tracks", clip_m / 1000, len(tracks), len(clipped))
     return clipped
 
 
@@ -122,7 +131,10 @@ def run(config: Config) -> str:
     if os.environ.get("HEATMAP_HTML_ONLY"):
         log.info("HEATMAP_HTML_ONLY set — skipping pyramid build")
         pyramid = load_pyramid_metadata(config.output_dir() / "tiles")
-        return build_and_save(pyramid, config)
+        stats_data = load_stats_panel_data(config.output_dir())
+        if stats_data is None:
+            log.warning("No _activities.json next to outputs — stats panel will be omitted")
+        return build_and_save(pyramid, config, stats_data=stats_data)
 
     n_new = sync_intervals_icu(config)
 
@@ -140,15 +152,13 @@ def run(config: Config) -> str:
         msg_0 = "No tracks loaded — check activity_types and date filters."
         raise ValueError(msg_0)
 
-    if (
-        config.track_clip_radius_km is not None
-        and home_lat is not None
-        and home_lon is not None
-    ):
+    if config.track_clip_radius_km is not None and home_lat is not None and home_lon is not None:
         tracks = _clip_tracks(tracks, home_lat, home_lon, config.track_clip_radius_km * 1000)
         if not tracks:
             msg_1 = "No GPS points remain after track_clip_radius_km filter."
             raise ValueError(msg_1)
 
     pyramid = build_pyramid(tracks, config.output_dir(), config)
-    return build_and_save(pyramid, config)
+    stats_data = stats_panel_data_from_tracks(tracks)
+    save_stats_panel_data(stats_data, config.output_dir())
+    return build_and_save(pyramid, config, stats_data=stats_data)

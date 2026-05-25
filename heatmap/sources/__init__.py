@@ -28,6 +28,7 @@ CANONICAL_COLS = [
     "name",
     "distance_m",
     "moving_time_s",
+    "elevation_gain_m",
     "file_path",
     "start_lat",
     "start_lon",
