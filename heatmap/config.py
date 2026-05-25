@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from dataclasses import field
 from enum import StrEnum
@@ -12,6 +13,15 @@ DEFAULT_ACTIVITIES_DIR = PROJECT_ROOT / "strava_export"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "cache"
 DEFAULT_INTERVALS_ICU_CACHE_DIR = DEFAULT_CACHE_DIR / "intervals_icu"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
+
+
+def _load_overrides(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 class ActivityType(StrEnum):
@@ -54,8 +64,30 @@ class Config:
     # The sync is also skipped when INTERVALS_ICU_API_KEY is unset.
     sync_enabled: bool = True
 
+    # Strava activity IDs to drop from the load. Use when an activity's GPS
+    # is broken in Strava but you've corrected it on intervals.icu — exclude
+    # the Strava row so dedup keeps the intervals.icu version. The activity
+    # admin UI (`make admin`) appends to this set via the overrides file.
+    excluded_strava_ids: list[str] = field(default_factory=list)
+
+    # Same idea for intervals.icu IDs (e.g. activities you don't want on
+    # the heatmap even though they're cached).
+    excluded_intervals_ids: list[str] = field(default_factory=list)
+
     # Which activity types to include. Use the ActivityType enum or raw strings.
     activity_types: list[str] = field(default_factory=lambda: [ActivityType.RUN])
+
+    # Per-profile activity-type sets for the multi-type viewer. Each key
+    # becomes a radio in the viewer's Activity section and gets its own tile
+    # pyramid under outputs/tiles/<key>/. None = single profile "all" from
+    # `activity_types` (back-compat). First key is the default visible one.
+    # Example:
+    #     activity_type_profiles={
+    #         "runs":        [ActivityType.RUN],
+    #         "trail_runs":  [ActivityType.TRAIL_RUN],
+    #         "hikes":       [ActivityType.HIKE],
+    #     }
+    activity_type_profiles: dict[str, list[str]] | None = None
 
     # --- Date filter (inclusive); None = unbounded --------------------------
     date_from: str | None = None
@@ -111,6 +143,28 @@ class Config:
     # --- Rendering ----------------------------------------------------------
     map_opacity: float = 0.85
 
+    # Recency layer skew. norm = ((date - lo) / (hi - lo)) ** recency_gamma.
+    # gamma > 1 compresses older dates into the dark end and gives recent
+    # dates more of the viridis range. Useful when the date range spans many
+    # years but most activity is recent. 1.0 = linear.
+    recency_gamma: float = 3.0
+
+    # Per-track altitude smoothing window (odd number of points, centered
+    # moving average). GPS altitude jitter is the main source of false hills;
+    # smoothing each track's altitude before computing segment deltas removes
+    # most of it. Affects all elevation-derived layers. 1 = no smoothing.
+    altitude_smoothing_window: int = 15
+
+    # Minimum segment grade (rise / run) to count as ascent. Filters GPS
+    # altitude noise (~0.5 m per second of jitter) on flat terrain.
+    # 0.025 = 2.5 %, light slopes included.
+    hill_min_grade: float = 0.025
+
+    # Blur sigma for the hill layer specifically (px at each zoom). Slightly
+    # larger than the global blur_sigma_px so parallel route variants within
+    # a few metres merge into one line at z=max.
+    hill_blur_sigma_px: int = 4
+
     # --- Colour range — None = auto (percentile clipped) --------------------
     speed_min_ms: float | None = None
     speed_max_ms: float | None = None
@@ -137,6 +191,21 @@ class Config:
 
     def track_cache_path(self) -> Path:
         return DEFAULT_CACHE_DIR / "track_cache.json"
+
+    def overrides_path(self) -> Path:
+        return DEFAULT_CACHE_DIR / "heatmap_overrides.json"
+
+    def all_excluded_strava_ids(self) -> list[str]:
+        return sorted({*self.excluded_strava_ids, *_load_overrides(self.overrides_path()).get("excluded_strava_ids", [])})
+
+    def all_excluded_intervals_ids(self) -> list[str]:
+        return sorted({*self.excluded_intervals_ids, *_load_overrides(self.overrides_path()).get("excluded_intervals_ids", [])})
+
+    def resolved_profiles(self) -> dict[str, list[str]]:
+        """Normalised activity-type profiles. Always returns ≥1 entry."""
+        if self.activity_type_profiles:
+            return self.activity_type_profiles
+        return {"all": list(self.activity_types)}
 
     def output_dir(self) -> Path:
         return DEFAULT_OUTPUT_DIR

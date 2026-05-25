@@ -58,12 +58,21 @@ def _resolve_starts(df: pd.DataFrame, strava_dir: Path) -> pd.DataFrame:
     return df
 
 
-def load(strava_dir: Path) -> pd.DataFrame:
-    """Load all Strava activities with a track file into the canonical schema."""
+def load(strava_dir: Path, excluded_ids: list[str] | None = None) -> pd.DataFrame:
+    """Load all Strava activities with a track file into the canonical schema.
+
+    `excluded_ids` drops the matching activities (by Strava Activity ID, as a
+    string) before any further processing. Use when an activity's GPS is
+    broken in Strava but corrected on another source.
+    """
     raw = pd.read_csv(strava_dir / "activities.csv")
     raw = normalize(raw)
     raw["Activity Date"] = pd.to_datetime(raw["Activity Date"], format="mixed", dayfirst=True)
     raw = raw[raw["Filename"].notna()].copy()  # drop indoor / manual entries
+    if excluded_ids:
+        before = len(raw)
+        raw = raw[~raw["Activity ID"].astype(str).isin(excluded_ids)].copy()
+        log.info("Strava: excluded %d activities by id (%d → %d)", before - len(raw), before, len(raw))
 
     out = pd.DataFrame()
     out["strava_id"] = raw["Activity ID"].astype(str)

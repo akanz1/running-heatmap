@@ -42,6 +42,17 @@ def _dedup_key(day: pd.Timestamp, lat: float, lon: float, dist_bucket: int) -> s
     return f"{day.date()}_{round(lat, 3)}_{round(lon, 3)}_{dist_bucket}"
 
 
+# Strava's "Activity Type" is sometimes less specific than intervals.icu's —
+# e.g. trail runs get tagged as plain "Run" in Strava but "TrailRun" on
+# intervals. When dedup matches, we promote Strava's type to the intervals
+# value if it falls in this set.
+_TYPE_PROMOTIONS: dict[tuple[str, str], str] = {
+    ("Run", "Trail Run"): "Trail Run",
+    ("Ride", "Mountain Bike Ride"): "Mountain Bike Ride",
+    ("Ride", "Gravel Ride"): "Gravel Ride",
+}
+
+
 def _merge(df_strava: pd.DataFrame, df_icu: pd.DataFrame) -> pd.DataFrame:
     """Concat strava + intervals. Drop intervals rows whose activity is
     already in strava_export.
@@ -55,12 +66,21 @@ def _merge(df_strava: pd.DataFrame, df_icu: pd.DataFrame) -> pd.DataFrame:
 
     Within-source duplicates are preserved (running the same route every
     day in Strava is 365 distinct activities, not one).
+
+    Type promotion: when a Strava row matches an intervals row, and the
+    intervals type is more specific (per `_TYPE_PROMOTIONS`), the Strava
+    row's type is updated. This catches the common case where Strava
+    silently classifies trail runs as plain Run.
     """
     if df_icu.empty:
         return df_strava.reset_index(drop=True)
 
-    strava_keys: set[str] = set()
-    for r in df_strava.itertuples(index=False):
+    df_strava = df_strava.reset_index(drop=True).copy()
+
+    # Build dedup-key → strava row index, so we can both drop matching
+    # intervals rows AND propagate intervals types back onto strava rows.
+    strava_key_to_idx: dict[str, int] = {}
+    for i, r in enumerate(df_strava.itertuples(index=False)):
         if pd.isna(r.start_lat) or pd.isna(r.distance_m):
             continue
         day = r.date.floor("D")
@@ -68,25 +88,39 @@ def _merge(df_strava: pd.DataFrame, df_icu: pd.DataFrame) -> pd.DataFrame:
         # Pre-expand by ±2 buckets (~±200 m) — same activity often differs by
         # >100 m between platforms (different start/stop/pause trimming).
         for b_off in (-2, -1, 0, 1, 2):
-            strava_keys.add(_dedup_key(day, r.start_lat, r.start_lon, bucket + b_off))
+            strava_key_to_idx.setdefault(_dedup_key(day, r.start_lat, r.start_lon, bucket + b_off), i)
 
-    keep_mask = []
+    keep_mask: list[bool] = []
+    promotions = 0
     for r in df_icu.itertuples(index=False):
         if pd.isna(r.start_lat) or pd.isna(r.distance_m):
             keep_mask.append(True)
             continue
         base = r.date.floor("D")
         bucket = round(r.distance_m / 100)
-        hit = any(
-            _dedup_key(base + pd.Timedelta(days=d_off), r.start_lat, r.start_lon, bucket)
-            in strava_keys
-            for d_off in (-1, 0, 1)
-        )
-        keep_mask.append(not hit)
+        matched_idx: int | None = None
+        for d_off in (-1, 0, 1):
+            k = _dedup_key(base + pd.Timedelta(days=d_off), r.start_lat, r.start_lon, bucket)
+            if k in strava_key_to_idx:
+                matched_idx = strava_key_to_idx[k]
+                break
+        if matched_idx is None:
+            keep_mask.append(True)
+            continue
+
+        # Promote the strava row's type if intervals has a finer label.
+        cur = df_strava.at[matched_idx, "type"]
+        promoted = _TYPE_PROMOTIONS.get((cur, r.type))
+        if promoted and promoted != cur:
+            df_strava.at[matched_idx, "type"] = promoted
+            promotions += 1
+        keep_mask.append(False)
 
     n_drop = sum(1 for k in keep_mask if not k)
     if n_drop:
         log.info("Dedup: dropped %d intervals.icu duplicates (already in strava_export)", n_drop)
+    if promotions:
+        log.info("Type promotion: %d strava rows updated from intervals.icu type", promotions)
     return pd.concat([df_strava, df_icu[keep_mask]], ignore_index=True)
 
 
@@ -135,30 +169,49 @@ def _filter_by_home_radius(runs: pd.DataFrame, home_lat: float, home_lon: float,
     return filtered
 
 
-def load_and_filter(config: Config) -> tuple[pd.DataFrame, float | None, float | None]:
-    """Load + merge all activity sources, filter by user config.
+def load_all(config: Config) -> tuple[pd.DataFrame, float | None, float | None]:
+    """Load + merge + dedup + GPS-filter both sources. No activity-type filter.
 
-    Returns (filtered_runs, home_lat, home_lon).
-    home_lat / home_lon are None in worldwide mode.
+    Returns (df_all, home_lat, home_lon). Home is detected from the full set
+    (independent of activity-type profile).
     """
     strava_dir = config.resolved_activities_dir()
     log.info("Source: strava_export at %s", strava_dir)
-    df_strava = strava_export.load(strava_dir)
+    df_strava = strava_export.load(strava_dir, excluded_ids=config.all_excluded_strava_ids())
 
     icu_dir = config.resolved_intervals_icu_cache_dir()
-    df_icu = intervals_icu.load(icu_dir)
+    df_icu = intervals_icu.load(icu_dir, excluded_ids=config.all_excluded_intervals_ids())
     if not df_icu.empty:
         log.info("Source: intervals.icu cache at %s", icu_dir)
 
     df = _merge(df_strava, df_icu)
-    runs = _filter_by_type_and_date(df, config.activity_types, config.date_from, config.date_to)
+    df = df[df["start_lat"].notna() & (df["gps_spread_m"] >= config.gps_spread_min_m)].copy()
+    log.info("After removing no-GPS / indoor: %d", len(df))
 
-    runs = runs[runs["start_lat"].notna() & (runs["gps_spread_m"] >= config.gps_spread_min_m)].copy()
-    log.info("After removing no-GPS / indoor: %d", len(runs))
+    home_lat, home_lon = _resolve_home(df, config)
+    return df, home_lat, home_lon
 
-    home_lat, home_lon = _resolve_home(runs, config)
 
+def filter_for_profile(
+    df_all: pd.DataFrame,
+    activity_types: list[str],
+    config: Config,
+    home_lat: float | None,
+    home_lon: float | None,
+) -> pd.DataFrame:
+    """Apply type/date/home-radius filters for a single profile."""
+    runs = _filter_by_type_and_date(df_all, activity_types, config.date_from, config.date_to)
     if config.radius_km is not None and home_lat is not None and home_lon is not None:
         runs = _filter_by_home_radius(runs, home_lat, home_lon, config.radius_km)
+    return runs
 
+
+def load_and_filter(config: Config) -> tuple[pd.DataFrame, float | None, float | None]:
+    """Single-profile convenience wrapper (back-compat).
+
+    Uses `config.activity_types`. For the multi-profile flow, call
+    `load_all()` + `filter_for_profile()` per profile.
+    """
+    df_all, home_lat, home_lon = load_all(config)
+    runs = filter_for_profile(df_all, config.activity_types, config, home_lat, home_lon)
     return runs, home_lat, home_lon

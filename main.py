@@ -13,9 +13,17 @@ config = Config(
     # Path to your unzipped Strava export folder.
     # None = <project_root>/strava_export.
     activities_dir=None,
-    # Activity types to include. Use ActivityType enum members or raw strings.
+    # Activity types to include (single-profile fallback).
     # e.g. [ActivityType.RUN, ActivityType.RIDE]
     activity_types=[ActivityType.RUN],
+    # Per-profile activity-type sets — each becomes a radio in the viewer's
+    # Activity section and gets its own tile pyramid under outputs/tiles/<key>/.
+    # Set to None to fall back to `activity_types` (single profile "all").
+    activity_type_profiles={
+        "runs":       [ActivityType.RUN],
+        "trail_runs": [ActivityType.TRAIL_RUN],
+        "hikes":      [ActivityType.HIKE],
+    },
     # Date filter (YYYY-MM-DD strings); None = unbounded.
     date_from=None,
     date_to=None,
@@ -29,6 +37,8 @@ config = Config(
     # Drop individual GPS points further than this from home.
     # None = no clipping (worldwide).
     track_clip_radius_km=None,
+    # Activity excludes live in cache/heatmap_overrides.json (managed via
+    # `make admin`). Override here only for one-off scripted runs.
 )
 
 if __name__ == "__main__":

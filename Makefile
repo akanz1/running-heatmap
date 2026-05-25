@@ -1,7 +1,7 @@
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
 
-.PHONY: setup update sync run run-html-only serve lint format clean
+.PHONY: setup update sync run run-html-only serve admin lint format clean
 
 ## Create venv and install all dependencies
 setup:
@@ -30,6 +30,11 @@ run-html-only:
 ## are loose PNGs on disk — browsers block fetch:// for security)
 serve:
 	cd outputs && uv run python -m http.server 8000
+
+## Start the activity admin UI on http://localhost:8001
+## Click exclude / re-import; run `make run` afterwards to rebuild.
+admin:
+	uv run python -m heatmap.admin_server
 
 ## Check lint + import order (no changes)
 lint:

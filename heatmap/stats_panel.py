@@ -54,11 +54,12 @@ def stats_panel_data_from_tracks(tracks: list[Track]) -> StatsPanelData:
     )
 
 
-_FILENAME = "_activities.json"
+def _path(output_dir: Path, profile: str) -> Path:
+    return output_dir / f"_activities_{profile}.json"
 
 
-def save_stats_panel_data(data: StatsPanelData, output_dir: Path) -> None:
-    (output_dir / _FILENAME).write_text(
+def save_stats_panel_data(data: StatsPanelData, output_dir: Path, profile: str = "all") -> None:
+    _path(output_dir, profile).write_text(
         json.dumps(
             {
                 "activities": data.activities,
@@ -71,8 +72,8 @@ def save_stats_panel_data(data: StatsPanelData, output_dir: Path) -> None:
     )
 
 
-def load_stats_panel_data(output_dir: Path) -> StatsPanelData | None:
-    p = output_dir / _FILENAME
+def load_stats_panel_data(output_dir: Path, profile: str = "all") -> StatsPanelData | None:
+    p = _path(output_dir, profile)
     if not p.exists():
         return None
     raw = json.loads(p.read_text())
@@ -180,15 +181,30 @@ _PANEL_JS = """
   }
   function fmtMeters(m) { return Math.round(m).toLocaleString() + " m"; }
 
+  var activeProfile = window.__DEFAULT_PROFILE__ || "all";
+
+  function dataForProfile(profile) {
+    var all = window.__STATS_BY_PROFILE__ || {};
+    return all[profile] || { activities: [], date_min_days: 0, date_max_days: 1, dist_max_km: 1 };
+  }
+
   function setup() {
-    var data = window.__ACTIVITIES__ || [];
     var dateLo = document.getElementById("date-lo");
     var dateHi = document.getElementById("date-hi");
     var distLo = document.getElementById("dist-lo");
     var distHi = document.getElementById("dist-hi");
     if (!dateLo) { setTimeout(setup, 100); return; }
 
+    function refreshSliderRanges() {
+      var d = dataForProfile(activeProfile);
+      dateLo.min = d.date_min_days; dateLo.max = d.date_max_days; dateLo.value = d.date_min_days;
+      dateHi.min = d.date_min_days; dateHi.max = d.date_max_days; dateHi.value = d.date_max_days;
+      distLo.min = 0; distLo.max = d.dist_max_km; distLo.value = 0;
+      distHi.min = 0; distHi.max = d.dist_max_km; distHi.value = d.dist_max_km;
+    }
+
     function recompute() {
+      var data = dataForProfile(activeProfile).activities;
       // Enforce lo <= hi for both ranges.
       var dl = +dateLo.value, dh = +dateHi.value;
       if (dl > dh) { dateLo.value = dh; dl = dh; }
@@ -219,7 +235,15 @@ _PANEL_JS = """
     [dateLo, dateHi, distLo, distHi].forEach(function(el) {
       el.addEventListener("input", recompute);
     });
+
+    refreshSliderRanges();
     recompute();
+
+    window.__statsPanelSetProfile__ = function(profile) {
+      activeProfile = profile;
+      refreshSliderRanges();
+      recompute();
+    };
   }
   document.addEventListener("DOMContentLoaded", setup);
 })();
@@ -227,14 +251,43 @@ _PANEL_JS = """
 """
 
 
-def build_stats_panel_html(data: StatsPanelData) -> str:
-    """Build the stats panel HTML+CSS+JS for inline injection into the map."""
-    data_js = (
-        f"<script>window.__ACTIVITIES__ = {json.dumps(data.activities, separators=(',', ':'))};</script>"
+def _stats_payload(data: StatsPanelData) -> dict:
+    return {
+        "activities": data.activities,
+        "date_min_days": data.date_min_days,
+        "date_max_days": data.date_max_days,
+        "dist_max_km": data.dist_max_km,
+    }
+
+
+def build_stats_panel_html(
+    stats_by_profile: dict[str, StatsPanelData | None],
+    default_profile: str,
+) -> str:
+    """Build the stats panel for inline injection.
+
+    Embeds every profile's activities so JS can swap without re-fetching.
+    """
+    payload: dict[str, dict] = {}
+    for profile, data in stats_by_profile.items():
+        if data is None:
+            continue
+        payload[profile] = _stats_payload(data)
+
+    if not payload:
+        return ""
+
+    default = payload.get(default_profile) or next(iter(payload.values()))
+
+    bootstrap_js = (
+        "<script>"
+        f"window.__STATS_BY_PROFILE__ = {json.dumps(payload, separators=(',', ':'))};"
+        f"window.__DEFAULT_PROFILE__ = {json.dumps(default_profile)};"
+        "</script>"
     )
     return (
-        data_js
+        bootstrap_js
         + _PANEL_CSS
-        + _panel_html(data.date_min_days, data.date_max_days, data.dist_max_km)
+        + _panel_html(default["date_min_days"], default["date_max_days"], default["dist_max_km"])
         + _PANEL_JS
     )

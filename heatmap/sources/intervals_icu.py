@@ -167,10 +167,11 @@ def sync(
     return n_new
 
 
-def load(cache_dir: Path) -> pd.DataFrame:
+def load(cache_dir: Path, excluded_ids: list[str] | None = None) -> pd.DataFrame:
     """Read the local intervals.icu cache into the canonical DataFrame.
 
     Returns an empty (well-typed) DataFrame if the cache doesn't exist yet.
+    `excluded_ids` drops rows by intervals activity id (`iXXXX...`).
     """
     if not (cache_dir / "index.json").exists():
         return pd.DataFrame(columns=CANONICAL_COLS)
@@ -179,6 +180,12 @@ def load(cache_dir: Path) -> pd.DataFrame:
     # STRAVA-sourced rows should not be in the index (sync skips them) but
     # filter defensively in case an older cache contains them.
     index = [e for e in index if e.get("source") != "STRAVA"]
+    if excluded_ids:
+        excl = set(excluded_ids)
+        before = len(index)
+        index = [e for e in index if e["id"] not in excl]
+        log.info("intervals.icu: excluded %d activities by id (%d → %d)",
+                 before - len(index), before, len(index))
 
     activities_dir = cache_dir / "activities"
     rows = []

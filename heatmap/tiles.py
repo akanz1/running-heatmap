@@ -28,16 +28,19 @@ import shutil
 from collections import defaultdict
 from dataclasses import asdict
 from dataclasses import dataclass
+from datetime import date as _date
 from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import maximum_filter
+from scipy.ndimage import uniform_filter1d
 from tqdm import tqdm
 
 from heatmap.colormaps import CMAP_COUNT
 from heatmap.colormaps import CMAP_ELEV
+from heatmap.colormaps import CMAP_HILL
 from heatmap.colormaps import CMAP_HR
 from heatmap.colormaps import CMAP_RECENCY
 from heatmap.colormaps import CMAP_SPEED
@@ -56,17 +59,24 @@ log = logging.getLogger(__name__)
 TILE_SIZE = 256
 MIN_SEGMENT_DIST_M = 0.5
 PRESENCE_PCT = 10
-RECENCY_WINDOW_DAYS = 365
+RECENCY_WINDOW_DAYS_12MO = 365
+RECENCY_WINDOW_DAYS_36MO = 365 * 3
 
 # Sum-semantic channels (downsample = sum, blur with Gaussian). Date_max has
 # max semantics and is handled separately.
 _CHANNELS = (
     "count",
-    "speed_sum", "speed_n",
-    "hr_sum", "hr_n",
-    "grad_sum", "grad_n",
-    "elev_sum", "elev_n",
+    "speed_sum",
+    "speed_n",
+    "hr_sum",
+    "hr_n",
+    "grad_sum",
+    "grad_n",
+    "elev_sum",
+    "elev_n",
+    "elev_gain_sum",
     "recent_count",
+    "recent_count_36mo",
 )
 
 
@@ -129,7 +139,9 @@ class SparseTile:
     grad_n: np.ndarray
     elev_sum: np.ndarray
     elev_n: np.ndarray
+    elev_gain_sum: np.ndarray
     recent_count: np.ndarray
+    recent_count_36mo: np.ndarray
     date_max: np.ndarray
 
     @classmethod
@@ -147,7 +159,9 @@ class SparseTile:
             grad_n=_z(),
             elev_sum=_z(),
             elev_n=_z(),
+            elev_gain_sum=_z(),
             recent_count=_z(),
+            recent_count_36mo=_z(),
             date_max=_z(),
         )
 
@@ -188,7 +202,14 @@ def _haversine_m(lat1: np.ndarray, lon1: np.ndarray, lat2: np.ndarray, lon2: np.
     return earth_r_m * 2 * np.arcsin(np.sqrt(a))
 
 
-def _paint_point(tiles: SparseTiles, gx: int, gy: int, date_days: int, in_recent: bool) -> None:
+def _paint_point(  # noqa: PLR0913
+    tiles: SparseTiles,
+    gx: int,
+    gy: int,
+    date_days: int,
+    in_recent_12: bool,
+    in_recent_36: bool,
+) -> None:
     tx, ty = gx // TILE_SIZE, gy // TILE_SIZE
     lx, ly = gx - tx * TILE_SIZE, gy - ty * TILE_SIZE
     key = (tx, ty)
@@ -197,10 +218,11 @@ def _paint_point(tiles: SparseTiles, gx: int, gy: int, date_days: int, in_recent
         tile = SparseTile.empty()
         tiles[key] = tile
     tile.count[ly, lx] += 1
-    if date_days > tile.date_max[ly, lx]:
-        tile.date_max[ly, lx] = date_days
-    if in_recent:
+    tile.date_max[ly, lx] = max(tile.date_max[ly, lx], date_days)
+    if in_recent_12:
         tile.recent_count[ly, lx] += 1
+    if in_recent_36:
+        tile.recent_count_36mo[ly, lx] += 1
 
 
 def _paint_segment_sparse(  # noqa: PLR0913
@@ -214,10 +236,15 @@ def _paint_segment_sparse(  # noqa: PLR0913
     grad: float | None,
     elev: float | None,
     date_days: int,
-    in_recent: bool,
+    in_recent_12: bool,
+    in_recent_36: bool,
+    hill_min_grade: float,
 ) -> None:
     dx, dy = x2 - x1, y2 - y1
     n_steps = max(int(max(abs(dx), abs(dy))) + 1, 1)
+    # Only treat the segment as ascent if both the sign is positive AND the
+    # grade exceeds a minimum — filters GPS altitude noise on flats.
+    elev_pos = elev if (elev is not None and elev > 0 and grad is not None and grad >= hill_min_grade) else None
     for i in range(n_steps + 1):
         t = i / n_steps
         gx = round(x1 + t * dx)
@@ -241,37 +268,78 @@ def _paint_segment_sparse(  # noqa: PLR0913
         if elev is not None:
             tile.elev_sum[ly, lx] += elev
             tile.elev_n[ly, lx] += 1
-        if date_days > tile.date_max[ly, lx]:
-            tile.date_max[ly, lx] = date_days
-        if in_recent:
+        if elev_pos is not None:
+            tile.elev_gain_sum[ly, lx] += elev_pos
+        tile.date_max[ly, lx] = max(tile.date_max[ly, lx], date_days)
+        if in_recent_12:
             tile.recent_count[ly, lx] += 1
+        if in_recent_36:
+            tile.recent_count_36mo[ly, lx] += 1
 
 
-def paint_tracks(tracks: list[Track], zoom: int, recent_cutoff_days: int) -> SparseTiles:
+def _smooth_altitudes(pts: list[list], window: int) -> list[list]:
+    """Return point copies with the altitude field replaced by a centered
+    moving average over `window` points.
+
+    GPS altitude has per-sample jitter (~0.5 m); raw a1-a0 deltas spike on
+    flats. Smoothing pre-segment removes most of that noise. Points with
+    no altitude (None) pass through; the window auto-shrinks at track ends.
+    """
+    if window <= 1 or len(pts) < window:
+        return pts
+
+    alts = np.array([(p[4] if p[4] is not None else np.nan) for p in pts], dtype=np.float32)
+    valid = ~np.isnan(alts)
+    if not valid.any():
+        return pts
+
+    filled = np.where(valid, alts, 0.0)
+    # Sum over the window AND count of valid points, then divide → NaN-safe avg.
+    sum_smooth = uniform_filter1d(filled, size=window, mode="nearest")
+    cnt_smooth = uniform_filter1d(valid.astype(np.float32), size=window, mode="nearest")
+    smoothed = np.where(cnt_smooth > 0, sum_smooth / np.maximum(cnt_smooth, 1e-6), np.nan)
+
+    out = []
+    for i, p in enumerate(pts):
+        s = smoothed[i]
+        new_alt = None if (np.isnan(s)) else float(s)
+        out.append([p[0], p[1], p[2], p[3], new_alt])
+    return out
+
+
+def paint_tracks(  # noqa: PLR0913
+    tracks: list[Track],
+    zoom: int,
+    recent_cutoff_12mo_days: int,
+    recent_cutoff_36mo_days: int,
+    hill_min_grade: float,
+    altitude_smoothing_window: int = 1,
+) -> SparseTiles:
     """Paint all tracks into sparse z=max tiles.
 
-    `recent_cutoff_days` = days-since-epoch threshold; tracks with date_days
-    >= cutoff contribute to the freshness layer's `recent_count`.
+    The two cutoffs gate the 12- and 36-month freshness counters; a track
+    crossing the 12mo cutoff also crosses the 36mo cutoff.
     """
     tiles: SparseTiles = {}
 
     for t in tqdm(tracks, desc=f"Painting z={zoom}", unit="track"):
-        pts = t.points
+        pts = _smooth_altitudes(t.points, altitude_smoothing_window)
         if not pts:
             continue
         lats = np.array([p[0] for p in pts])
         lons = np.array([p[1] for p in pts])
         gxs, gys = lonlat_to_global_px_array(lats, lons, zoom)
-        in_recent = t.date_days >= recent_cutoff_days
+        in_recent_12 = t.date_days >= recent_cutoff_12mo_days
+        in_recent_36 = t.date_days >= recent_cutoff_36mo_days
 
-        # Per-point: count + date_max + recent_count.
+        # Per-point: count + date_max + recent_count{,_36mo}.
         for i in range(len(pts)):
-            _paint_point(tiles, round(gxs[i]), round(gys[i]), t.date_days, in_recent)
+            _paint_point(tiles, round(gxs[i]), round(gys[i]), t.date_days, in_recent_12, in_recent_36)
 
         if len(pts) < 2:  # noqa: PLR2004
             continue
 
-        # Per-segment: speed/hr/grad/elev + date_max + recent_count along the line.
+        # Per-segment: speed/hr/grad/elev + elev_gain + date_max + freshness.
         seg_dists = _haversine_m(lats[:-1], lons[:-1], lats[1:], lons[1:])
         for i in range(len(pts) - 1):
             speed, hr, grad, elev = _segment_metrics(pts[i], pts[i + 1], float(seg_dists[i]))
@@ -286,7 +354,9 @@ def paint_tracks(tracks: list[Track], zoom: int, recent_cutoff_days: int) -> Spa
                 grad,
                 elev,
                 t.date_days,
-                in_recent,
+                in_recent_12,
+                in_recent_36,
+                hill_min_grade,
             )
 
     return tiles
@@ -393,9 +463,7 @@ def downsample_tiles(child_tiles: SparseTiles) -> SparseTiles:
                 ds = _downsample_quadrant(src)
                 getattr(parent, attr)[qy_lo : qy_lo + 128, qx_lo : qx_lo + 128] = ds
             # date_max uses max semantics across the 2x2 quadrant.
-            parent.date_max[qy_lo : qy_lo + 128, qx_lo : qx_lo + 128] = _downsample_quadrant_max(
-                child.date_max
-            )
+            parent.date_max[qy_lo : qy_lo + 128, qx_lo : qx_lo + 128] = _downsample_quadrant_max(child.date_max)
             del child  # release the array refs now, not at function return
         parent_tiles[(px, py)] = parent
     return parent_tiles
@@ -413,8 +481,10 @@ class ZoomStats:
     hr_range: tuple[float, float]
     grad_range: tuple[float, float]
     elev_abs_hi: float
+    elev_gain_hi: float
     date_range: tuple[float, float]
     recent_count_max: float
+    recent_count_36mo_max: float
 
 
 def _compute_zoom_stats(  # noqa: PLR0913
@@ -435,12 +505,14 @@ def _compute_zoom_stats(  # noqa: PLR0913
     """
     blurred_count_max = 0.0
     blurred_recent_count_max = 0.0
+    blurred_recent_count_36mo_max = 0.0
     date_min = math.inf
     date_max_val = -math.inf
     speed_means: list[np.ndarray] = []
     hr_means: list[np.ndarray] = []
     grad_means: list[np.ndarray] = []
     elev_means: list[np.ndarray] = []
+    elev_gain_means: list[np.ndarray] = []
 
     # One pass: blur each tile's count to find the true post-blur max, and
     # collect raw per-pixel means for percentile ranges. Raw means are a
@@ -453,6 +525,10 @@ def _compute_zoom_stats(  # noqa: PLR0913
         b_recent = _blur_tile_attr(tiles, tx, ty, "recent_count", sigma, margin)
         if b_recent.max() > blurred_recent_count_max:
             blurred_recent_count_max = float(b_recent.max())
+
+        b_recent_36 = _blur_tile_attr(tiles, tx, ty, "recent_count_36mo", sigma, margin)
+        if b_recent_36.max() > blurred_recent_count_36mo_max:
+            blurred_recent_count_36mo_max = float(b_recent_36.max())
 
         nonzero_dates = tile.date_max[tile.date_max > 0]
         if nonzero_dates.size:
@@ -471,6 +547,7 @@ def _compute_zoom_stats(  # noqa: PLR0913
         if (tile.elev_n > 0).any():
             mask = tile.elev_n > 0
             elev_means.append((tile.elev_sum[mask] / tile.elev_n[mask]).astype(np.float32))
+            elev_gain_means.append((tile.elev_gain_sum[mask] / tile.elev_n[mask]).astype(np.float32))
 
     count_max = max(blurred_count_max, 1e-6)
 
@@ -499,6 +576,13 @@ def _compute_zoom_stats(  # noqa: PLR0913
             )
         elev_abs_hi = max(elev_abs_hi, 1e-6)
 
+    elev_gain_hi = 0.0
+    if elev_gain_means:
+        flat = np.concatenate(elev_gain_means)
+        if flat.size:
+            elev_gain_hi = float(np.percentile(flat, 100 - pct))
+        elev_gain_hi = max(elev_gain_hi, 1e-6)
+
     if not math.isfinite(date_min):
         date_min, date_max_val = 0.0, 1.0
 
@@ -508,8 +592,10 @@ def _compute_zoom_stats(  # noqa: PLR0913
         hr_range=(h_lo, h_hi),
         grad_range=(g_lo, g_hi),
         elev_abs_hi=elev_abs_hi,
+        elev_gain_hi=elev_gain_hi,
         date_range=(date_min, date_max_val),
         recent_count_max=max(blurred_recent_count_max, 1e-6),
+        recent_count_36mo_max=max(blurred_recent_count_36mo_max, 1e-6),
     )
 
 
@@ -525,12 +611,20 @@ def _to_rgba_u8(norm: np.ndarray, cmap: mcolors.LinearSegmentedColormap, alpha: 
     return (rgba * 255).clip(0, 255).astype(np.uint8)
 
 
-def _white_alpha_u8(alpha: np.ndarray) -> np.ndarray:
+def _solid_color_alpha_u8(rgb: tuple[int, int, int], alpha: np.ndarray) -> np.ndarray:
+    """Constant-RGB image with a per-pixel alpha channel."""
     h, w = alpha.shape
     arr = np.zeros((h, w, 4), dtype=np.uint8)
-    arr[:, :, :3] = 255
+    arr[:, :, 0] = rgb[0]
+    arr[:, :, 1] = rgb[1]
+    arr[:, :, 2] = rgb[2]
     arr[:, :, 3] = (alpha * 255).clip(0, 255).astype(np.uint8)
     return arr
+
+
+# Steepness layer colour: a deep forest green — saturated enough to pop on
+# dark basemaps, dark enough to read on light basemaps.
+_GRAD_COLOR_RGB = (20, 140, 60)
 
 
 def _presence_alpha_for_tile(n_grid_blurred: np.ndarray, n_grid_raw: np.ndarray) -> np.ndarray:
@@ -552,6 +646,8 @@ def _save_tile_pngs(  # noqa: PLR0913
     margin: int,
     stats: ZoomStats,
     output_root: Path,
+    recency_gamma: float = 1.0,
+    hill_sigma: float = 3.0,
 ) -> int:
     """Blur, normalize, colour-map, and save PNGs for every tile at this zoom."""
     s_lo, s_hi = stats.speed_range
@@ -565,6 +661,8 @@ def _save_tile_pngs(  # noqa: PLR0913
     # Spread date_max across a small window so the recency layer matches the
     # Gaussian-blurred layers' visual thickness. Size ≈ 2*margin + 1.
     date_filter_size = max(3, 2 * margin + 1)
+    g_recency = max(recency_gamma, 0.1)
+    hill_margin = max(margin, math.ceil(hill_sigma * 3))
 
     saved = 0
     iter_tiles = list(tiles.keys())
@@ -602,7 +700,9 @@ def _save_tile_pngs(  # noqa: PLR0913
         grad_mean = np.where(b_grad_n > 0, b_grad_s / b_grad_n, 0)
         grad_norm = np.clip((grad_mean - g_lo) / g_span, 0, 1)
         grad_norm = np.where(b_grad_n > 0, grad_norm, 0)
-        alpha_grad = _presence_alpha_for_tile(b_grad_n, raw.grad_n) * (0.15 + 0.85 * grad_norm)
+        # Quadratic falloff: flat pixels fade to near-zero alpha; steep
+        # pixels stay fully saturated.
+        alpha_grad = _presence_alpha_for_tile(b_grad_n, raw.grad_n) * grad_norm**2
 
         # Gradient change (signed)
         b_elev_s = _blur_tile_attr(tiles, tx, ty, "elev_sum", sigma, margin)
@@ -610,19 +710,42 @@ def _save_tile_pngs(  # noqa: PLR0913
         elev_mean = np.where(b_elev_n > 0, b_elev_s / b_elev_n, 0)
         elev_norm = np.clip(elev_mean / max(stats.elev_abs_hi, 1e-6), -1, 1)
         elev_norm = np.where(b_elev_n > 0, elev_norm, 0)
-        alpha_elev = _presence_alpha_for_tile(b_elev_n, raw.elev_n)
+        # Up-vs-down layer: fade pixels that are roughly flat (|elev_norm| ≈ 0)
+        # so only segments with a clear direction stand out.
+        directionality = np.abs(elev_norm)  # 0 at flat, 1 at the percentile extremes
+        alpha_elev = _presence_alpha_for_tile(b_elev_n, raw.elev_n) * (0.05 + 0.95 * directionality)
 
-        # Recency (max-filtered, viridis on normalised date_max)
+        # Recency (max-filtered, viridis on normalised date_max).
+        # Gamma > 1 compresses older dates into the dark end so the recent
+        # half of the date span gets more of the colormap.
         r_date = _max_filter_tile_attr(tiles, tx, ty, "date_max", date_filter_size, margin)
-        date_norm = np.clip((r_date - d_lo) / d_span, 0, 1)
+        date_norm_raw = np.clip((r_date - d_lo) / d_span, 0, 1)
+        date_norm = date_norm_raw**g_recency
         # alpha: presence of any activity (reuse blurred count) — recency
         # only meaningful where the heatmap has data
         alpha_recency = _presence_alpha_for_tile(b_count, raw.count) * (r_date > 0)
 
-        # Freshness (blurred recent_count, log scale like count_log)
+        # Freshness 12 mo (blurred recent_count, log scale)
         b_recent = _blur_tile_attr(tiles, tx, ty, "recent_count", sigma, margin)
         fresh_norm = np.log1p(b_recent) / np.log1p(max(stats.recent_count_max, 1e-9))
         fresh_norm = np.clip(fresh_norm, 0, 1)
+
+        # Freshness 36 mo
+        b_recent_36 = _blur_tile_attr(tiles, tx, ty, "recent_count_36mo", sigma, margin)
+        fresh36_norm = np.log1p(b_recent_36) / np.log1p(max(stats.recent_count_36mo_max, 1e-9))
+        fresh36_norm = np.clip(fresh36_norm, 0, 1)
+
+        # Hill training: per-pixel mean ascent, presence-alpha (same shape as
+        # Gradient absolute, just coloured and with a slightly bigger blur so
+        # parallel tracks within a few metres merge into one line).
+        b_elev_gain_s_h = _blur_tile_attr(tiles, tx, ty, "elev_gain_sum", hill_sigma, hill_margin)
+        b_elev_n_h = _blur_tile_attr(tiles, tx, ty, "elev_n", hill_sigma, hill_margin)
+        gain_mean = np.where(b_elev_n_h > 0, b_elev_gain_s_h / b_elev_n_h, 0)
+        gain_norm = np.clip(gain_mean / max(stats.elev_gain_hi, 1e-6), 0, 1)
+        gain_norm = np.where(b_elev_n_h > 0, gain_norm, 0)
+        # Quadratic falloff: low-gain pixels go nearly transparent so hill
+        # spots stand out cleanly.
+        alpha_hill = _presence_alpha_for_tile(b_elev_n_h, raw.elev_n) * gain_norm**2
 
         # Colour-map and save
         layer_imgs = {
@@ -630,10 +753,12 @@ def _save_tile_pngs(  # noqa: PLR0913
             "count_log": _to_rgba_u8(clog, CMAP_COUNT),
             "speed": _to_rgba_u8(speed_norm, CMAP_SPEED, alpha_speed),
             "hr": _to_rgba_u8(hr_norm, CMAP_HR, alpha_hr),
-            "grad": _white_alpha_u8(alpha_grad),
+            "grad": _solid_color_alpha_u8(_GRAD_COLOR_RGB, alpha_grad),
             "elev": _to_rgba_u8((elev_norm + 1) / 2, CMAP_ELEV, alpha_elev),
+            "hill": _to_rgba_u8(gain_norm, CMAP_HILL, alpha_hill),
             "recency": _to_rgba_u8(date_norm, CMAP_RECENCY, alpha_recency),
             "freshness": _to_rgba_u8(fresh_norm, CMAP_COUNT),
+            "freshness_36mo": _to_rgba_u8(fresh36_norm, CMAP_COUNT),
         }
 
         for layer_name, img in layer_imgs.items():
@@ -662,8 +787,10 @@ class PyramidResult:
     hr_range: tuple[float, float]
     grad_range: tuple[float, float]
     count_max: float
+    elev_gain_hi: float
     date_range_days: tuple[float, float]
     recent_count_max: float
+    recent_count_36mo_max: float
 
 
 def _occupied_bbox_latlon(
@@ -699,11 +826,20 @@ def build_pyramid(
     tracks: list[Track],
     output_dir: Path,
     config: Config,
+    profile: str = "all",
+    force_min_zoom: int | None = None,
 ) -> PyramidResult:
-    """End-to-end: paint sparse → for each zoom: stats → blur → save → downsample."""
-    tiles_dir = output_dir / "tiles"
+    """End-to-end: paint sparse → for each zoom: stats → blur → save → downsample.
+
+    Each profile's PNGs live under `outputs/tiles/<profile>/<layer>/...` so
+    multiple profiles can coexist; the viewer swaps profile via radio.
+
+    `force_min_zoom` overrides the auto-detect heuristic — used in
+    multi-profile builds so every profile reaches the same bottom zoom and
+    no profile gets upscaled-from-higher-zoom when the user zooms out.
+    """
+    tiles_dir = output_dir / "tiles" / profile
     if tiles_dir.exists():
-        log.info("Wiping existing tiles dir: %s", tiles_dir)
         shutil.rmtree(tiles_dir)
     tiles_dir.mkdir(parents=True)
 
@@ -711,15 +847,25 @@ def build_pyramid(
     sigma = config.blur_sigma_px
     margin = math.ceil(sigma * 3)  # 3 * sigma Gaussian footprint
 
-    from datetime import date as _date
     today_days = (_date.today() - _date(1970, 1, 1)).days
-    recent_cutoff_days = today_days - RECENCY_WINDOW_DAYS
+    recent_cutoff_12mo = today_days - RECENCY_WINDOW_DAYS_12MO
+    recent_cutoff_36mo = today_days - RECENCY_WINDOW_DAYS_36MO
 
     log.info("Painting sparse z=%d (sigma=%d px, margin=%d px)…", z_max, sigma, margin)
-    current_tiles = paint_tracks(tracks, z_max, recent_cutoff_days)
+    current_tiles = paint_tracks(
+        tracks,
+        z_max,
+        recent_cutoff_12mo,
+        recent_cutoff_36mo,
+        config.hill_min_grade,
+        altitude_smoothing_window=config.altitude_smoothing_window,
+    )
     log.info("z=%d painted: %d occupied tiles", z_max, len(current_tiles))
 
-    if config.min_zoom is None:
+    if force_min_zoom is not None:
+        z_min = force_min_zoom
+        log.info("Forced min_zoom: %d", z_min)
+    elif config.min_zoom is None:
         z_min = _auto_min_zoom(current_tiles, z_max, config.min_zoom_target_px)
         log.info("Auto min_zoom: %d (data fills ≥ %d px of viewport)", z_min, config.min_zoom_target_px)
     else:
@@ -761,7 +907,16 @@ def build_pyramid(
                 stats.grad_range[1] * 100,
             )
 
-        saved = _save_tile_pngs(current_tiles, z, sigma, margin, stats, tiles_dir)
+        saved = _save_tile_pngs(
+            current_tiles,
+            z,
+            sigma,
+            margin,
+            stats,
+            tiles_dir,
+            recency_gamma=config.recency_gamma,
+            hill_sigma=config.hill_blur_sigma_px,
+        )
         log.info("z=%2d → %d PNGs written across %d tiles", z, saved, len(current_tiles))
 
         if z > z_min:
@@ -781,8 +936,10 @@ def build_pyramid(
         hr_range=base_stats.hr_range,
         grad_range=base_stats.grad_range,
         count_max=base_stats.count_max,
+        elev_gain_hi=base_stats.elev_gain_hi,
         date_range_days=base_stats.date_range,
         recent_count_max=base_stats.recent_count_max,
+        recent_count_36mo_max=base_stats.recent_count_36mo_max,
     )
     _save_pyramid_metadata(result)
     return result
@@ -817,8 +974,10 @@ def load_pyramid_metadata(tiles_dir: Path) -> PyramidResult:
         hr_range=tuple(payload["hr_range"]),
         grad_range=tuple(payload["grad_range"]),
         count_max=payload["count_max"],
+        elev_gain_hi=payload.get("elev_gain_hi", 1.0),
         date_range_days=tuple(payload.get("date_range_days", (0, 1))),
         recent_count_max=payload.get("recent_count_max", 1.0),
+        recent_count_36mo_max=payload.get("recent_count_36mo_max", 1.0),
     )
 
 

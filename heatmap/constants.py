@@ -30,6 +30,16 @@ CMAP_HR_NODES = [
     (1.00, (1.00, 0.90, 0.90, 1.00)),
 ]
 
+# Hill training: dark navy → purple → red-orange → bright red. Alpha kept
+# solid here — the tile renderer drives visibility via a presence-based
+# alpha channel, identical to the Gradient (absolute) layer.
+CMAP_HILL_NODES = [
+    (0.00, (0.10, 0.20, 0.55, 1.00)),  # dark navy
+    (0.40, (0.45, 0.15, 0.60, 1.00)),  # purple
+    (0.75, (0.90, 0.25, 0.30, 1.00)),  # red-orange
+    (1.00, (1.00, 0.10, 0.10, 1.00)),  # bright red
+]
+
 # Diverging — gradient change: green (descent) → dark neutral → purple (ascent)
 # Green (0.12, 0.80, 0.22) luminance ≈ 0.60; purple (0.82, 0.22, 1.00) ≈ 0.36.
 # Pure perceptual balance not achievable without making purple look lavender.
