@@ -1,6 +1,6 @@
 # Running Heatmap
 
-Code from [this video](https://youtu.be/PA8d4u5T4BM?si=83GTMI449kCsgb4B) — shared by request, since extended.
+Writeup: [akanz.de/posts/running-heatmap](https://www.akanz.de/posts/running-heatmap/). Original [video](https://youtu.be/PA8d4u5T4BM?si=83GTMI449kCsgb4B) — shared by request, since extended.
 
 Turns a Strava data export (and optionally an intervals.icu API key) into an interactive heatmap. Renders sharply at every zoom from continent view down to street level. No live API needed for the base case — just the zip Strava lets you download.
 
@@ -34,15 +34,11 @@ make setup
 | Command | What it does |
 |---|---|
 | `make setup` | Create `.venv/` and install deps |
-| `make update` | Upgrade all deps to latest versions |
 | `make sync` | Sync new intervals.icu activities into `cache/intervals_icu/` (no-op without an API key) |
 | `make run` | Generate `outputs/heatmap.html` + tile pyramid (runs `sync` first, prompts before rebuild) |
 | `make run-html-only` | Re-render HTML using the existing tile pyramid (~1 s) |
 | `make serve` | Serve `outputs/` on `http://localhost:8000` (heatmap viewer) |
 | `make admin` | Start the activity admin UI on `http://localhost:8001` |
-| `make lint` | `ruff check` |
-| `make format` | `ruff check --fix` + `ruff format` |
-| `make clean` | Delete the venv |
 
 ## Usage
 
@@ -84,6 +80,7 @@ Web UI on `http://localhost:8001` to manage which activities feed the heatmap. U
 - An intervals.icu activity changed (you edited its track) → re-import button
 
 Features:
+
 - Filter by name / id / source / state (kept vs excluded)
 - Sort by date / name / distance / time / elevation
 - Per-row link to the activity on strava.com or intervals.icu
@@ -161,139 +158,57 @@ Config(
 )
 ```
 
-## Project layout
-
-```
-main.py                  entry point — edit Config here
-.env / .env.example      INTERVALS_ICU_API_KEY etc.
-strava_export/           your unzipped Strava export (gitignored)
-cache/                   parse caches + intervals.icu cache + overrides JSON (gitignored)
-outputs/                 heatmap.html + tile pyramid (gitignored)
-heatmap/
-├── __init__.py          run() pipeline + sync wiring + TTY prompt
-├── config.py            Config dataclass, ActivityType enum
-├── constants.py         math constants + colormap node definitions
-├── colormaps.py         Matplotlib colormaps (incl. viridis for recency, navy→red for hill)
-├── localization.py      non-English column / activity-type translations
-├── activities.py        merge + dedup of strava_export + intervals.icu rows
-├── parsers.py           FIT / GPX / TCX track-file parsers
-├── tracks.py            Track dataclass + cached track loader
-├── sources/
-│   ├── strava_export.py CSV loader → canonical schema
-│   └── intervals_icu.py API client, incremental sync, cache loader
-├── tiles.py             sparse tile pyramid: paint, downsample, blur, save
-├── basemaps.py          basemap definitions (URL, attribution, env-var gating)
-├── layer_panel.py       custom grouped radio panel (replaces Folium's flat control)
-├── legend.py            HTML legend rows (one per layer)
-├── stats_panel.py       floating count/km/time/elev panel + dual sliders
-├── render.py            Folium map assembly + save
-├── admin.py             activity admin backend (list / exclude / re-import)
-├── admin_server.py      stdlib http.server wiring for `make admin`
-├── admin.html           admin UI page (served by admin_server)
-├── format.py            pace formatting helpers
-└── assets.py            (legacy, unused since the custom layer panel)
-```
-
 ## How it works
 
 ### Tile pyramid
 
-For each zoom level from `max_zoom` down to `min_zoom`:
+At `max_zoom`, every GPS point is painted into a sparse `dict[(tx, ty)] → SparseTile` — memory scales with occupied tiles, not bounding box, so multi-continent datasets are fine. Each tile is blurred (with neighbours buffered so edges don't fade), colour-mapped, and saved. Lower zooms are produced by 2×2 downsampling (sum for accumulators, max for `date_max`). Per-zoom percentile-clipped stats keep every level visually distinct from continent down to street.
 
-1. **Paint** (at `max_zoom` only): walk every GPS point, route it into a sparse `dict[(tx, ty)] → SparseTile`. Memory scales with **number of occupied tiles**, not the data's bounding box — multi-continent datasets are fine.
-2. **Stats**: percentile-clipped global ranges for pace / HR / gradient / elev_gain plus min/max date and blurred maxima for count + recent_count.
-3. **Blur + normalise + colour-map + save** each tile, pulling neighbours into a buffer so edges don't fade.
-4. **Downsample** to the next-lower zoom: 2×2 sum for accumulators, 2×2 max for `date_max`.
-
-Per-zoom stats mean each level autonomously uses its full dynamic range — a continent-wide z=4 view stays visually distinct from a city-level z=17 view.
-
-The viewer clamps user navigation to `[pyramid.min_zoom, pyramid.max_zoom]` — no upscaling, no downscaling past the level where data fits the screen.
+The viewer clamps navigation to `[min_zoom, max_zoom]` — no upscaling, no zooming out past where data fills the screen.
 
 ### Dedup across sources
 
-Same activity might be in both `strava_export/` and `cache/intervals_icu/`. Match key is `(day ±1, start_lat to 3 dp, start_lon to 3 dp, distance bucketed to 200 m)`. Within-source duplicates are kept (running the same route every day is 365 distinct activities, not one).
-
-### Activity admin → overrides → build
-
-```
-cache/heatmap_overrides.json   ←  written by `make admin` (and merged with Config fields)
-        │
-        ▼
-heatmap.activities.load_and_filter
-        │
-        ▼
-   excludes applied
-        │
-        ▼
-   dedup → filter → home → painter
-```
+The same activity may be in both `strava_export/` and `cache/intervals_icu/`. Match key: `(day ±1, start_lat to 3 dp, start_lon to 3 dp, distance bucketed to 200 m)`. Within-source duplicates are kept (same route every day = N activities, not one).
 
 ### Iterating on the HTML only
 
-`make run-html-only` reuses the existing tile pyramid (and its `_pyramid.json` + `_activities.json` sidecars) and just regenerates `outputs/heatmap.html`. Takes ~1 s instead of the full ~10 min, useful when tweaking the panel / legend / colors.
+`make run-html-only` reuses the tile pyramid and `_activities.json` sidecar, regenerating just `outputs/heatmap.html` in ~1 s — useful when tweaking the panel / legend / colours.
 
-### Logging
+### Track formats
 
-Every module logs through `logging.getLogger(__name__)`. `configure_logging()` (called automatically from `run()`) sets up a single root handler. Bump to `logging.DEBUG` for more detail.
-
-### Non-English exports
-
-Strava exports column names and activity types in your account's language. `localization.py` translates them to canonical English so the rest of the code stays language-agnostic. German is included; add other locales to `COLUMN_ALIASES` / `ACTIVITY_TYPE_ALIASES` as needed.
-
-### Home detection
-
-Home is auto-detected from the most common activity start point in the date range, then only activities within `radius_km` of that point are kept. It's a heuristic — if you started more activities from work or a club than from home, that location wins. Override with `home_lat` / `home_lon`.
-
-### Supported track formats
-
-| Format | Source | Fields recovered |
-|---|---|---|
-| `.fit.gz` / `.fit` | Modern Garmin / most devices, intervals.icu downloads | lat, lon, speed, HR, altitude |
-| `.gpx.gz` / `.gpx` | Older Strava activities, manual uploads | lat, lon, speed (derived from timestamps), HR (if present), altitude |
-| `.tcx.gz` | Garmin Training Center format | lat, lon, speed (derived), HR, altitude |
-
-For GPX and TCX, speed isn't a native field, so it's derived from consecutive timestamps using Haversine distance. Outliers (>15 m/s) are dropped.
+`.fit(.gz)`, `.gpx(.gz)`, `.tcx.gz`. FIT carries speed/HR/altitude natively; for GPX/TCX, speed is derived from consecutive timestamps via Haversine, outliers (>15 m/s) dropped.
 
 ### Caching
 
-- `<strava_export>/_gps_cache.json` — per-Strava-file start point + GPS spread (~3 min on first run, ~0 s after)
-- `cache/intervals_icu/_gps_cache.json` — same for intervals.icu activities
-- `cache/track_cache.json` — full parsed track points (the dominant cost on cold rebuilds)
-- `cache/intervals_icu/index.json` — synced activity metadata
-- `cache/intervals_icu/activities/<id>.fit` — synced track files
-- `cache/heatmap_overrides.json` — exclude lists managed by `make admin`
+Parse caches in `<strava_export>/_gps_cache.json`, `cache/intervals_icu/_gps_cache.json`, `cache/track_cache.json` (dominant cost on cold rebuilds). Tiles are not cached — `outputs/tiles/` is wiped and rebuilt each full run.
 
-Tiles themselves are **not** cached — `outputs/tiles/` is wiped and rebuilt every full run. The activities JSON for the stats panel sidecar is persisted at `outputs/_activities.json` so `make run-html-only` can reuse it.
+### Non-English exports
+
+Strava localises column names and activity types. `localization.py` maps them to canonical English. German included; add locales to `COLUMN_ALIASES` / `ACTIVITY_TYPE_ALIASES`.
+
+### Home detection
+
+Auto-detected as the most common start point in the date range. Heuristic — if you start more often from work, that wins. Override with `home_lat` / `home_lon`.
 
 ---
 
 ## Notes
 
-### The frequency map measures time on path, not number of passes
+### Frequency = time on path, not number of passes
 
-GPS records at ~1 Hz, so frequency layers count GPS samples per pixel rather than distinct activities. A slower run deposits more points on the same path than a faster one. In practice this means the map shows something closer to time spent on each road than how many times you've run it — arguably more useful, but worth knowing.
+GPS records at ~1 Hz, so frequency counts samples per pixel. A slow run deposits more points than a fast one on the same path — the map shows time on each road more than visit count. Log-scale variant exists because a few favourite routes dominate on linear.
 
-The log-scale version exists because a few favourite routes tend to dominate completely on a linear scale, washing out everything else.
+### Pace and HR are all-time pixel averages
 
-### Pace and HR are all-time averages
+Each pixel = mean across every activity that crossed it. A single hard effort gets averaged out by easy visits, so visual max sits well below true peak HR. Narrow the date range for a specific period.
 
-Each pixel is the mean across every activity that ever crossed it. A route you used to run slowly but now run fast will show somewhere in the middle. Narrow the date range if you want a specific period.
+### Gradient layers depend on GPS altitude quality
 
-The HR layer in particular shows **pixel-averaged** HR — a single hard effort gets averaged out by many easier visits to the same pixel, so the visual max is typically well below your actual peak HR.
-
-### The gradient layers are only as good as GPS altitude
-
-GPS altitude is much noisier than horizontal position — typically ±10–20 m vertically versus ±3–5 m horizontally. To compensate:
-
-- `altitude_smoothing_window` (default 15) applies a centered moving average to each track's altitude before any segment delta is computed
-- `hill_min_grade` (default 2.5%) gates the hill-training accumulator so flat-terrain jitter doesn't drift into "hills"
-- Hill, Steepness, and Up-vs-down layers all use a quadratic alpha falloff so weak signal fades to transparent
-
-Even with all that, the gradient layers are reliable on hilly terrain but can look noisy on flat routes where the signal-to-noise is poor.
+GPS altitude is noisy (±10–20 m vs ±3–5 m horizontal). `altitude_smoothing_window` (default 15) applies a centered moving average; `hill_min_grade` (default 2.5%) gates the hill accumulator. Reliable on hilly terrain, noisy on flats.
 
 ### Coordinate systems
 
-All raster work happens in Web Mercator (EPSG:3857) pixel space, the same coordinate system the basemap tiles use, so no reprojection is needed at render time. Real-world distances (clip radius, segment lengths for gradient) use the Haversine formula directly on lat/lon — accurate everywhere on the globe.
+Raster work in Web Mercator (EPSG:3857) pixel space — same as basemap tiles, no reprojection. Real-world distances use Haversine on lat/lon directly.
 
 ---
 
