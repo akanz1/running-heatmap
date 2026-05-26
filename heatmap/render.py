@@ -120,8 +120,15 @@ def build_and_save(
     default_profile = profiles[0]
     default_pyramid = pyramid_by_profile[default_profile]
 
-    bounds = default_pyramid.bounds_latlon
-    centre = default_pyramid.centre_latlon
+    # Initial view fits the UNION of all profiles, not just the default one —
+    # otherwise switching to another profile can leave half its data off-screen.
+    all_bounds = [p.bounds_latlon for p in pyramid_by_profile.values()]
+    south = min(b[0][0] for b in all_bounds)
+    west = min(b[0][1] for b in all_bounds)
+    north = max(b[1][0] for b in all_bounds)
+    east = max(b[1][1] for b in all_bounds)
+    bounds = [[south, west], [north, east]]
+    centre = [(south + north) / 2, (west + east) / 2]
     z_min = min(p.min_zoom for p in pyramid_by_profile.values())
     z_max = max(p.max_zoom for p in pyramid_by_profile.values())
 
@@ -165,6 +172,6 @@ def build_and_save(
     output_path.parent.mkdir(exist_ok=True)
     m.save(str(output_path))
     log.info("Saved: %s  (profiles: %s)", output_path, ", ".join(profiles))
-    log.info("Serve: cd %s && python -m http.server 8000", output_path.parent)
+    log.info("Serve: make serve")
     log.info("Open:  http://localhost:8000/%s", output_path.name)
     return str(output_path)

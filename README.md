@@ -46,7 +46,12 @@ make setup
 
 ## Usage
 
-1. Request your data from Strava: **Settings → My Account → Download or Delete Your Account → Download Request**. Unzip into `<project_root>/strava_export/`.
+Two sources, in any combination:
+
+- **Strava bulk export** (no live API). Request via **Settings → My Account → Download or Delete Your Account → Download Request**, unzip into `<project_root>/strava_export/`.
+- **intervals.icu sync** (live, see below). Fills in activities missing from Strava, or runs as the sole source — if `strava_export/activities.csv` is absent the Strava loader is skipped and the pipeline renders the intervals.icu cache on its own.
+
+1. Set up at least one of the two sources above.
 2. (Optional) Set up intervals.icu sync — see below.
 3. Edit `main.py` if you need to filter or move home (defaults render every run worldwide).
 4. `make run` — heatmap, tiles, HTML written to `outputs/`. First run with ~500 tracks takes ~10 minutes; subsequent runs reuse the parse cache.
@@ -56,7 +61,10 @@ Basemap, heatmap layer, and stats panel are all in the viewer — no rebuild nee
 
 ### Optional: intervals.icu sync
 
-Fills gaps when an activity exists on intervals.icu but not your Strava export (e.g. Garmin Connect uploads that never went through Strava).
+Two roles:
+
+- **Gap filler** alongside a Strava export — covers activities that exist on intervals.icu but not in your Strava bulk export (e.g. Garmin Connect uploads that never went through Strava).
+- **Sole source** when you don't have or don't want a Strava export — leave `strava_export/` empty (or absent) and the pipeline runs on the intervals.icu cache only.
 
 1. `cp .env.example .env`
 2. Set `INTERVALS_ICU_API_KEY` and `INTERVALS_ICU_ATHLETE_ID` from <https://intervals.icu/settings> (Developer section).
@@ -286,3 +294,11 @@ Even with all that, the gradient layers are reliable on hilly terrain but can lo
 ### Coordinate systems
 
 All raster work happens in Web Mercator (EPSG:3857) pixel space, the same coordinate system the basemap tiles use, so no reprojection is needed at render time. Real-world distances (clip radius, segment lengths for gradient) use the Haversine formula directly on lat/lon — accurate everywhere on the globe.
+
+---
+
+## Origin & License
+
+Originally forked from [moresamwilson/running-heatmap](https://github.com/moresamwilson/running-heatmap) (MIT, Copyright (c) 2026 Sam Wilson). The codebase has since been substantially rewritten and extended, but the original MIT terms are preserved verbatim in [LICENSE.upstream](LICENSE.upstream) as the license requires.
+
+This fork is licensed under **[PolyForm Noncommercial 1.0.0](LICENSE)** — free for personal, hobby, research, and educational use; commercial use is prohibited.

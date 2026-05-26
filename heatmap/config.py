@@ -175,19 +175,14 @@ class Config:
     # --- Path helpers -------------------------------------------------------
 
     def resolved_activities_dir(self) -> Path:
-        """Return the export folder, validating that activities.csv exists."""
-        path = Path(self.activities_dir) if self.activities_dir else DEFAULT_ACTIVITIES_DIR
-        if not (path / "activities.csv").exists():
-            msg = f"activities.csv not found in {path}. Set activities_dir in Config to override the default."
-            raise FileNotFoundError(msg)
-        return path
+        """Return the export folder. Missing dir / activities.csv is allowed —
+        an intervals.icu-only setup is valid; the Strava loader returns an
+        empty frame in that case.
+        """
+        return Path(self.activities_dir) if self.activities_dir else DEFAULT_ACTIVITIES_DIR
 
     def resolved_intervals_icu_cache_dir(self) -> Path:
-        return (
-            Path(self.intervals_icu_cache_dir)
-            if self.intervals_icu_cache_dir
-            else DEFAULT_INTERVALS_ICU_CACHE_DIR
-        )
+        return Path(self.intervals_icu_cache_dir) if self.intervals_icu_cache_dir else DEFAULT_INTERVALS_ICU_CACHE_DIR
 
     def track_cache_path(self) -> Path:
         return DEFAULT_CACHE_DIR / "track_cache.json"
@@ -196,10 +191,14 @@ class Config:
         return DEFAULT_CACHE_DIR / "heatmap_overrides.json"
 
     def all_excluded_strava_ids(self) -> list[str]:
-        return sorted({*self.excluded_strava_ids, *_load_overrides(self.overrides_path()).get("excluded_strava_ids", [])})
+        return sorted(
+            {*self.excluded_strava_ids, *_load_overrides(self.overrides_path()).get("excluded_strava_ids", [])}
+        )
 
     def all_excluded_intervals_ids(self) -> list[str]:
-        return sorted({*self.excluded_intervals_ids, *_load_overrides(self.overrides_path()).get("excluded_intervals_ids", [])})
+        return sorted(
+            {*self.excluded_intervals_ids, *_load_overrides(self.overrides_path()).get("excluded_intervals_ids", [])}
+        )
 
     def resolved_profiles(self) -> dict[str, list[str]]:
         """Normalised activity-type profiles. Always returns ≥1 entry."""

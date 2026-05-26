@@ -27,9 +27,11 @@ run-html-only:
 	HEATMAP_HTML_ONLY=1 uv run python main.py
 
 ## Serve outputs/ on http://localhost:8000 (needed because TileLayers
-## are loose PNGs on disk — browsers block fetch:// for security)
+## are loose PNGs on disk — browsers block fetch:// for security).
+## Returns a transparent PNG for missing tiles (sparse pyramid),
+## and silences BrokenPipeError tracebacks on cancelled requests.
 serve:
-	cd outputs && uv run python -m http.server 8000
+	uv run python -m heatmap.serve
 
 ## Start the activity admin UI on http://localhost:8001
 ## Click exclude / re-import; run `make run` afterwards to rebuild.

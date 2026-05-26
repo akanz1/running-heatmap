@@ -58,14 +58,43 @@ def _resolve_starts(df: pd.DataFrame, strava_dir: Path) -> pd.DataFrame:
     return df
 
 
+def _empty() -> pd.DataFrame:
+    """Empty canonical frame with typed columns so concat with intervals.icu
+    data preserves dtypes.
+    """
+    return pd.DataFrame(
+        {
+            "activity_id": pd.Series(dtype="object"),
+            "strava_id": pd.Series(dtype="object"),
+            "date": pd.Series(dtype="datetime64[ns]"),
+            "type": pd.Series(dtype="object"),
+            "name": pd.Series(dtype="object"),
+            "distance_m": pd.Series(dtype="float64"),
+            "moving_time_s": pd.Series(dtype="float64"),
+            "elevation_gain_m": pd.Series(dtype="float64"),
+            "file_path": pd.Series(dtype="object"),
+            "start_lat": pd.Series(dtype="float64"),
+            "start_lon": pd.Series(dtype="float64"),
+            "gps_spread_m": pd.Series(dtype="float64"),
+        }
+    )
+
+
 def load(strava_dir: Path, excluded_ids: list[str] | None = None) -> pd.DataFrame:
     """Load all Strava activities with a track file into the canonical schema.
 
     `excluded_ids` drops the matching activities (by Strava Activity ID, as a
     string) before any further processing. Use when an activity's GPS is
     broken in Strava but corrected on another source.
+
+    Returns an empty (but correctly-typed) frame when `activities.csv` is
+    absent — supports intervals.icu-only setups with no Strava export at all.
     """
-    raw = pd.read_csv(strava_dir / "activities.csv")
+    csv_path = strava_dir / "activities.csv"
+    if not csv_path.exists():
+        log.info("No Strava export at %s — skipping (intervals.icu-only mode)", strava_dir)
+        return _empty()
+    raw = pd.read_csv(csv_path)
     raw = normalize(raw)
     raw["Activity Date"] = pd.to_datetime(raw["Activity Date"], format="mixed", dayfirst=True)
     raw = raw[raw["Filename"].notna()].copy()  # drop indoor / manual entries
