@@ -393,21 +393,64 @@ def _assemble_with_neighbors(
     return out
 
 
-def _blur_tile_attr(
+def _blur_tile_channels(
     tiles: SparseTiles,
     tx: int,
     ty: int,
-    attr: str,
+    attrs: tuple[str, ...],
     sigma: float,
     margin: int,
-) -> np.ndarray:
-    """Blur this tile with neighbour context, return centre TILE_SIZE x TILE_SIZE."""
-    assembled = _assemble_with_neighbors(tiles, tx, ty, attr, margin)
-    blurred = gaussian_filter(assembled, sigma=sigma)
-    return blurred[margin : margin + TILE_SIZE, margin : margin + TILE_SIZE]
+) -> dict[str, np.ndarray]:
+    """Blur several same-(sigma, margin) channels through one shared neighbour
+    assembly + a single Gaussian call.
+
+    The 3x3 neighbour grid is the same for every channel, so assemble it once,
+    stack the channels into a (C, exp, exp) array, and blur with
+    ``sigma=(0, sigma, sigma)`` — the zero on the channel axis stops any blur leaking
+    between channels. Bit-identical to blurring each channel separately, but
+    skips C-1 redundant neighbour assemblies and Gaussian calls.
+
+    Returns {attr: centre TILE_SIZE x TILE_SIZE blurred array}.
+    """
+    exp = TILE_SIZE + 2 * margin
+    stack = np.zeros((len(attrs), exp, exp), dtype=np.float32)
+    for dtx in (-1, 0, 1):
+        for dty in (-1, 0, 1):
+            nb = tiles.get((tx + dtx, ty + dty))
+            if nb is None:
+                continue
+            ax0 = margin + dtx * TILE_SIZE
+            ay0 = margin + dty * TILE_SIZE
+            ax_lo, ay_lo = max(0, ax0), max(0, ay0)
+            ax_hi, ay_hi = min(exp, ax0 + TILE_SIZE), min(exp, ay0 + TILE_SIZE)
+            sx_lo, sy_lo = ax_lo - ax0, ay_lo - ay0
+            sx_hi, sy_hi = ax_hi - ax0, ay_hi - ay0
+            for i, attr in enumerate(attrs):
+                stack[i, ay_lo:ay_hi, ax_lo:ax_hi] = getattr(nb, attr)[sy_lo:sy_hi, sx_lo:sx_hi]
+    blurred = gaussian_filter(stack, sigma=(0, sigma, sigma))
+    centre = blurred[:, margin : margin + TILE_SIZE, margin : margin + TILE_SIZE]
+    return {attr: centre[i] for i, attr in enumerate(attrs)}
 
 
-def _max_filter_tile_attr(
+# Channel groups blurred together (one shared assembly per group).
+_SIGMA_BLUR_ATTRS = (
+    "count",
+    "speed_sum",
+    "speed_n",
+    "hr_sum",
+    "hr_n",
+    "grad_sum",
+    "grad_n",
+    "elev_sum",
+    "elev_n",
+    "recent_count",
+    "recent_count_36mo",
+)
+_HILL_BLUR_ATTRS = ("elev_gain_sum", "elev_n")
+_STATS_BLUR_ATTRS = ("count", "recent_count", "recent_count_36mo")
+
+
+def _max_filter_tile_attr(  # noqa: PLR0913
     tiles: SparseTiles,
     tx: int,
     ty: int,
@@ -518,17 +561,10 @@ def _compute_zoom_stats(  # noqa: PLR0913
     # collect raw per-pixel means for percentile ranges. Raw means are a
     # close approximation to blurred means at the percentile boundaries.
     for (tx, ty), tile in tiles.items():
-        b_count = _blur_tile_attr(tiles, tx, ty, "count", sigma, margin)
-        if b_count.max() > blurred_count_max:
-            blurred_count_max = float(b_count.max())
-
-        b_recent = _blur_tile_attr(tiles, tx, ty, "recent_count", sigma, margin)
-        if b_recent.max() > blurred_recent_count_max:
-            blurred_recent_count_max = float(b_recent.max())
-
-        b_recent_36 = _blur_tile_attr(tiles, tx, ty, "recent_count_36mo", sigma, margin)
-        if b_recent_36.max() > blurred_recent_count_36mo_max:
-            blurred_recent_count_36mo_max = float(b_recent_36.max())
+        b = _blur_tile_channels(tiles, tx, ty, _STATS_BLUR_ATTRS, sigma, margin)
+        blurred_count_max = max(blurred_count_max, float(b["count"].max()))
+        blurred_recent_count_max = max(blurred_recent_count_max, float(b["recent_count"].max()))
+        blurred_recent_count_36mo_max = max(blurred_recent_count_36mo_max, float(b["recent_count_36mo"].max()))
 
         nonzero_dates = tile.date_max[tile.date_max > 0]
         if nonzero_dates.size:
@@ -669,8 +705,11 @@ def _save_tile_pngs(  # noqa: PLR0913
     for tx, ty in tqdm(iter_tiles, desc=f"Saving z={zoom}", unit="tile", leave=False):
         raw = tiles[(tx, ty)]
 
+        # All same-sigma channels share one neighbour assembly + Gaussian call.
+        b = _blur_tile_channels(tiles, tx, ty, _SIGMA_BLUR_ATTRS, sigma, margin)
+
         # Frequency layers
-        b_count = _blur_tile_attr(tiles, tx, ty, "count", sigma, margin)
+        b_count = b["count"]
         if b_count.max() == 0 and raw.count.max() == 0:
             continue
         cnorm = b_count / max(stats.count_max, 1e-9)
@@ -679,24 +718,24 @@ def _save_tile_pngs(  # noqa: PLR0913
         clog = np.clip(clog, 0, 1)
 
         # Speed
-        b_speed_s = _blur_tile_attr(tiles, tx, ty, "speed_sum", sigma, margin)
-        b_speed_n = _blur_tile_attr(tiles, tx, ty, "speed_n", sigma, margin)
+        b_speed_s = b["speed_sum"]
+        b_speed_n = b["speed_n"]
         speed_mean = np.where(b_speed_n > 0, b_speed_s / b_speed_n, 0)
         speed_norm = np.clip((speed_mean - s_lo) / s_span, 0, 1)
         speed_norm = np.where(b_speed_n > 0, speed_norm, 0)
         alpha_speed = _presence_alpha_for_tile(b_speed_n, raw.speed_n)
 
         # HR
-        b_hr_s = _blur_tile_attr(tiles, tx, ty, "hr_sum", sigma, margin)
-        b_hr_n = _blur_tile_attr(tiles, tx, ty, "hr_n", sigma, margin)
+        b_hr_s = b["hr_sum"]
+        b_hr_n = b["hr_n"]
         hr_mean = np.where(b_hr_n > 0, b_hr_s / b_hr_n, 0)
         hr_norm = np.clip((hr_mean - h_lo) / h_span, 0, 1)
         hr_norm = np.where(b_hr_n > 0, hr_norm, 0)
         alpha_hr = _presence_alpha_for_tile(b_hr_n, raw.hr_n)
 
         # Gradient (absolute)
-        b_grad_s = _blur_tile_attr(tiles, tx, ty, "grad_sum", sigma, margin)
-        b_grad_n = _blur_tile_attr(tiles, tx, ty, "grad_n", sigma, margin)
+        b_grad_s = b["grad_sum"]
+        b_grad_n = b["grad_n"]
         grad_mean = np.where(b_grad_n > 0, b_grad_s / b_grad_n, 0)
         grad_norm = np.clip((grad_mean - g_lo) / g_span, 0, 1)
         grad_norm = np.where(b_grad_n > 0, grad_norm, 0)
@@ -705,8 +744,8 @@ def _save_tile_pngs(  # noqa: PLR0913
         alpha_grad = _presence_alpha_for_tile(b_grad_n, raw.grad_n) * grad_norm**2
 
         # Gradient change (signed)
-        b_elev_s = _blur_tile_attr(tiles, tx, ty, "elev_sum", sigma, margin)
-        b_elev_n = _blur_tile_attr(tiles, tx, ty, "elev_n", sigma, margin)
+        b_elev_s = b["elev_sum"]
+        b_elev_n = b["elev_n"]
         elev_mean = np.where(b_elev_n > 0, b_elev_s / b_elev_n, 0)
         elev_norm = np.clip(elev_mean / max(stats.elev_abs_hi, 1e-6), -1, 1)
         elev_norm = np.where(b_elev_n > 0, elev_norm, 0)
@@ -726,20 +765,21 @@ def _save_tile_pngs(  # noqa: PLR0913
         alpha_recency = _presence_alpha_for_tile(b_count, raw.count) * (r_date > 0)
 
         # Freshness 12 mo (blurred recent_count, log scale)
-        b_recent = _blur_tile_attr(tiles, tx, ty, "recent_count", sigma, margin)
+        b_recent = b["recent_count"]
         fresh_norm = np.log1p(b_recent) / np.log1p(max(stats.recent_count_max, 1e-9))
         fresh_norm = np.clip(fresh_norm, 0, 1)
 
         # Freshness 36 mo
-        b_recent_36 = _blur_tile_attr(tiles, tx, ty, "recent_count_36mo", sigma, margin)
+        b_recent_36 = b["recent_count_36mo"]
         fresh36_norm = np.log1p(b_recent_36) / np.log1p(max(stats.recent_count_36mo_max, 1e-9))
         fresh36_norm = np.clip(fresh36_norm, 0, 1)
 
         # Hill training: per-pixel mean ascent, presence-alpha (same shape as
         # Gradient absolute, just coloured and with a slightly bigger blur so
         # parallel tracks within a few metres merge into one line).
-        b_elev_gain_s_h = _blur_tile_attr(tiles, tx, ty, "elev_gain_sum", hill_sigma, hill_margin)
-        b_elev_n_h = _blur_tile_attr(tiles, tx, ty, "elev_n", hill_sigma, hill_margin)
+        bh = _blur_tile_channels(tiles, tx, ty, _HILL_BLUR_ATTRS, hill_sigma, hill_margin)
+        b_elev_gain_s_h = bh["elev_gain_sum"]
+        b_elev_n_h = bh["elev_n"]
         gain_mean = np.where(b_elev_n_h > 0, b_elev_gain_s_h / b_elev_n_h, 0)
         gain_norm = np.clip(gain_mean / max(stats.elev_gain_hi, 1e-6), 0, 1)
         gain_norm = np.where(b_elev_n_h > 0, gain_norm, 0)
@@ -766,7 +806,7 @@ def _save_tile_pngs(  # noqa: PLR0913
                 continue
             out_dir = output_root / layer_name / str(zoom) / str(tx)
             out_dir.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(img, mode="RGBA").save(out_dir / f"{ty}.png")
+            Image.fromarray(img, mode="RGBA").save(out_dir / f"{ty}.png", compress_level=3)
             saved += 1
     return saved
 
