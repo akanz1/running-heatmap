@@ -5,6 +5,8 @@ import math as _math
 import os
 import sys
 import warnings
+from concurrent.futures import as_completed
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as _pd
@@ -146,8 +148,33 @@ def _clip_tracks(
                     points=[t.points[i] for i in range(len(t.points)) if mask[i]],
                 )
             )
-    log.info("Clipped tracks within %.1f km of home: %d → %d tracks", clip_m / 1000, len(tracks), len(clipped))
+    log.info(
+        "Clipped tracks within %.1f km of home: %d → %d tracks",
+        clip_m / 1000,
+        len(tracks),
+        len(clipped),
+    )
     return clipped
+
+
+def _build_profile(
+    profile: str,
+    tracks: list[Track],
+    output_dir: object,
+    config: Config,
+    forced_min_zoom: int | None,
+) -> tuple[str, object, object]:
+    """Build one profile's tile pyramid + stats. Designed to run in a worker
+    process (top-level, not a closure, so it pickles).
+
+    Each profile writes only to outputs/tiles/<profile>/ + its own stats
+    sidecar, so concurrent profiles never touch the same files.
+    """
+    configure_logging()
+    pyramid = build_pyramid(tracks, output_dir, config, profile=profile, force_min_zoom=forced_min_zoom)
+    stats_data = stats_panel_data_from_tracks(tracks)
+    save_stats_panel_data(stats_data, output_dir, profile=profile)
+    return profile, pyramid, stats_data
 
 
 def run(config: Config) -> str:
@@ -191,8 +218,10 @@ def run(config: Config) -> str:
     # shrunk when the user zooms out below their natural min.
     forced_min_zoom = _union_min_zoom_from_df(df_all, config)
 
-    pyramid_by_profile: dict[str, object] = {}
-    stats_by_profile: dict[str, object] = {}
+    # Phase 1 (sequential): filter + parse tracks per profile. Kept serial
+    # because load_tracks reads/writes one shared track-cache file; concurrent
+    # writers would corrupt it. Cheap when the cache is warm.
+    tracks_by_profile: dict[str, list[Track]] = {}
     for profile, types in profiles.items():
         log.info("==== profile %r (types=%s) ====", profile, types)
         runs = filter_for_profile(df_all, types, config, home_lat, home_lon)
@@ -211,11 +240,44 @@ def run(config: Config) -> str:
                 log.warning("profile %r: no GPS points after clip, skipping", profile)
                 continue
 
-        pyramid = build_pyramid(tracks, config.output_dir(), config, profile=profile, force_min_zoom=forced_min_zoom)
-        stats_data = stats_panel_data_from_tracks(tracks)
-        save_stats_panel_data(stats_data, config.output_dir(), profile=profile)
-        pyramid_by_profile[profile] = pyramid
-        stats_by_profile[profile] = stats_data
+        tracks_by_profile[profile] = tracks
+
+    if not tracks_by_profile:
+        msg = "No profile produced tracks — check filters."
+        raise ValueError(msg)
+
+    # Phase 2 (parallel): each profile's pyramid is CPU-bound and writes to its
+    # own outputs/tiles/<profile>/, so build them in separate processes. Wall
+    # time drops to roughly the slowest single profile. Set HEATMAP_SERIAL=1 to
+    # force the old sequential path (debugging / very low RAM).
+    out_dir = config.output_dir()
+    results: dict[str, tuple[object, object]] = {}
+    if len(tracks_by_profile) == 1 or os.environ.get("HEATMAP_SERIAL"):
+        for profile, tracks in tracks_by_profile.items():
+            _, pyr, stats_data = _build_profile(profile, tracks, out_dir, config, forced_min_zoom)
+            results[profile] = (pyr, stats_data)
+    else:
+        workers = min(len(tracks_by_profile), os.cpu_count() or 1)
+        log.info(
+            "Building %d profiles in parallel (%d workers)…",
+            len(tracks_by_profile),
+            workers,
+        )
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(_build_profile, profile, tracks, out_dir, config, forced_min_zoom)
+                for profile, tracks in tracks_by_profile.items()
+            ]
+            for fut in as_completed(futures):
+                p, pyr, stats_data = fut.result()
+                results[p] = (pyr, stats_data)
+
+    # Reassemble in config order — as_completed yields completion order, which
+    # would make the HTML's profile/radio order non-deterministic across runs.
+    pyramid_by_profile: dict[str, object] = {}
+    stats_by_profile: dict[str, object] = {}
+    for profile in tracks_by_profile:
+        pyramid_by_profile[profile], stats_by_profile[profile] = results[profile]
 
     if not pyramid_by_profile:
         msg = "No profile produced tiles — check filters."
