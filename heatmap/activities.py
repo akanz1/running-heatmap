@@ -127,7 +127,8 @@ def _merge(df_strava: pd.DataFrame, df_icu: pd.DataFrame) -> pd.DataFrame:
 def _filter_by_type_and_date(
     df: pd.DataFrame, activity_types: list[str], date_from: str | None, date_to: str | None
 ) -> pd.DataFrame:
-    runs = df[df["type"].isin(activity_types)].copy()
+    # Empty type list = no type filter (the "all activities" profile).
+    runs = (df if not activity_types else df[df["type"].isin(activity_types)]).copy()
     log.info("Total matching activities: %d", len(runs))
 
     d_from = date.fromisoformat(date_from) if date_from else date.min

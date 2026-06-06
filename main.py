@@ -19,10 +19,12 @@ config = Config(
     # Per-profile activity-type sets — each becomes a radio in the viewer's
     # Activity section and gets its own tile pyramid under outputs/tiles/<key>/.
     # Set to None to fall back to `activity_types` (single profile "all").
+    # Empty list = no type filter → every activity in one layer.
     activity_type_profiles={
         "runs":       [ActivityType.RUN],
         "trail_runs": [ActivityType.TRAIL_RUN],
         "hikes":      [ActivityType.HIKE],
+        "all":        [ActivityType.RUN, ActivityType.TRAIL_RUN, ActivityType.HIKE],
     },
     # Date filter (YYYY-MM-DD strings); None = unbounded.
     date_from=None,

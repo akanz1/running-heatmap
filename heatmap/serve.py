@@ -43,6 +43,10 @@ _TRANSPARENT_PNG = _make_transparent_png()
 
 class HeatmapHandler(SimpleHTTPRequestHandler):
     def send_head(self) -> BytesIO | BinaryIO | None:
+        # Root has no index.html (the viewer is heatmap.html), so the default
+        # handler would render a directory listing. Serve the viewer instead.
+        if self.path in ("/", "/index.html"):
+            self.path = "/heatmap.html"
         if self.path.startswith("/tiles/") and self.path.endswith(".png"):
             disk_path = Path(self.translate_path(self.path))
             if not disk_path.is_file():
