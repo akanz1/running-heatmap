@@ -20,16 +20,17 @@ from heatmap.basemaps import available_basemaps
 # subdir, visible) triple to create TileLayers; this module emits the panel
 # HTML + JS using all five fields.
 LAYERS: list[tuple[str, str, str, str, bool]] = [
-    ("Frequency",  "Top routes",      "count",          "legend-frequency",        False),
-    ("Frequency",  "All routes",      "count_log",      "legend-frequency-log",    True),
-    ("Pace",       "Average",         "speed",          "legend-pace-avg",         False),
-    ("Heart rate", "Average",         "hr",             "legend-heart-rate-avg",   False),
-    ("Elevation",  "Steepness",       "grad",           "legend-gradient",         False),
-    ("Elevation",  "Up vs down",      "elev",           "legend-elev-change",      False),
-    ("Elevation",  "Hill training",   "hill",           "legend-hill",             False),
-    ("Time",       "Recency",         "recency",        "legend-recency",          False),
-    ("Time",       "Freshness 12 mo", "freshness",      "legend-freshness",        False),
-    ("Time",       "Freshness 36 mo", "freshness_36mo", "legend-freshness-36mo",   False),
+    ("Frequency", "Top routes", "count", "legend-frequency", False),
+    ("Frequency", "All routes", "count_log", "legend-frequency-log", True),
+    ("Time", "Recency", "recency", "legend-recency", False),
+    ("Time", "Freshness 3 mo", "freshness_3mo", "legend-freshness-3mo", False),
+    ("Time", "Freshness 12 mo", "freshness", "legend-freshness", False),
+    ("Time", "Freshness 36 mo", "freshness_36mo", "legend-freshness-36mo", False),
+    ("Pace", "Average", "speed", "legend-pace-avg", False),
+    ("Heart rate", "Average", "hr", "legend-heart-rate-avg", False),
+    ("Elevation", "Steepness", "grad", "legend-gradient", False),
+    ("Elevation", "Up vs down", "elev", "legend-elev-change", False),
+    ("Elevation", "Hill training", "hill", "legend-hill", False),
 ]
 
 
@@ -73,18 +74,14 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
         for p in profiles:
             checked = "checked" if p == default_profile else ""
             label = p.replace("_", " ").title()
-            rows.append(
-                f'<label><input type="radio" name="profile" value="{p}" {checked}>'
-                f'<span>{label}</span></label>'
-            )
+            rows.append(f'<label><input type="radio" name="profile" value="{p}" {checked}><span>{label}</span></label>')
         rows.append('<div class="divider"></div>')
 
     rows.append('<div class="group-title">Basemap</div>')
     for i, b in enumerate(available_basemaps()):
         checked = "checked" if i == 0 else ""
         rows.append(
-            f'<label><input type="radio" name="basemap" value="{b.key}" {checked}>'
-            f'<span>{b.label}</span></label>'
+            f'<label><input type="radio" name="basemap" value="{b.key}" {checked}><span>{b.label}</span></label>'
         )
     rows.append('<div class="divider"></div>')
 
@@ -95,8 +92,7 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
             last_group = group
         checked = "checked" if visible else ""
         rows.append(
-            f'<label><input type="radio" name="heatmap-layer" value="{subdir}" {checked}>'
-            f'<span>{display}</span></label>'
+            f'<label><input type="radio" name="heatmap-layer" value="{subdir}" {checked}><span>{display}</span></label>'
         )
     return '<div id="layer-panel">\n' + "\n".join(rows) + "\n</div>"
 
@@ -107,7 +103,7 @@ def _layer_meta_json() -> str:
 
 
 def _basemap_meta_json() -> str:
-    """key → url_match substring so the JS can locate each TileLayer."""
+    """Key → url_match substring so the JS can locate each TileLayer."""
     return json.dumps({b.key: b.url_match for b in available_basemaps()})
 
 

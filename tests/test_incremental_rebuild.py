@@ -6,8 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
+from heatmap import _profile_input_fingerprint
 from heatmap import _profiles_changed_by_types
 from heatmap.config import ActivityType
+from heatmap.config import Config
 from heatmap.sources import intervals_icu
 
 
@@ -95,6 +99,55 @@ class SyncResultTests(unittest.TestCase):
             self.assertEqual(result.activity_types, frozenset({"Trail Run"}))
             self.assertEqual(json.loads((cache_dir / "index.json").read_text())[0]["id"], "i1")
             self.assertTrue((cache_dir / "activities" / "i1.fit").exists())
+
+
+class FingerprintTests(unittest.TestCase):
+    def test_profile_fingerprint_changes_with_file_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            track = Path(tmp) / "activity.fit"
+            track.write_bytes(b"old")
+            df = pd.DataFrame(
+                [
+                    {
+                        "activity_id": "icu-i1",
+                        "date": pd.Timestamp("2026-06-17T07:00:00"),
+                        "type": "Run",
+                        "distance_m": 1000,
+                        "moving_time_s": 300,
+                        "elevation_gain_m": 20,
+                        "file_path": track,
+                    }
+                ]
+            )
+
+            first = _profile_input_fingerprint("runs", [ActivityType.RUN], df, Config(), forced_min_zoom=12)
+            track.write_bytes(b"new-content")
+            second = _profile_input_fingerprint("runs", [ActivityType.RUN], df, Config(), forced_min_zoom=12)
+
+        self.assertNotEqual(first, second)
+
+    def test_profile_fingerprint_changes_with_tile_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            track = Path(tmp) / "activity.fit"
+            track.write_bytes(b"same")
+            df = pd.DataFrame(
+                [
+                    {
+                        "activity_id": "icu-i1",
+                        "date": pd.Timestamp("2026-06-17T07:00:00"),
+                        "type": "Run",
+                        "distance_m": 1000,
+                        "moving_time_s": 300,
+                        "elevation_gain_m": 20,
+                        "file_path": track,
+                    }
+                ]
+            )
+
+            first = _profile_input_fingerprint("runs", [ActivityType.RUN], df, Config(max_zoom=17), 12)
+            second = _profile_input_fingerprint("runs", [ActivityType.RUN], df, Config(max_zoom=16), 12)
+
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

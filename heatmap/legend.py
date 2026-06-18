@@ -50,6 +50,7 @@ def build_legend_html(  # noqa: PLR0913
     count_max: float,
     elev_gain_hi: float,
     date_range_days: tuple[float, float],
+    recent_count_3mo_max: float,
     recent_count_max: float,
     recent_count_36mo_max: float,
 ) -> str:
@@ -58,6 +59,7 @@ def build_legend_html(  # noqa: PLR0913
     g_lo, g_hi = grad_range
     d_lo, d_hi = date_range_days
     count_max_int = int(count_max)
+    recent_count_3mo_max_int = max(1, int(recent_count_3mo_max))
     recent_count_max_int = max(1, int(recent_count_max))
     recent_count_36mo_max_int = max(1, int(recent_count_36mo_max))
     elev_gain_hi_int = max(1, int(elev_gain_hi * 100))  # cm/segment → readable scale
@@ -81,7 +83,7 @@ def build_legend_html(  # noqa: PLR0913
     border:1px solid rgba(255,255,255,0.10);
     box-shadow:0 2px 8px rgba(0,0,0,0.6);
 ">
-  {_row("legend-frequency", "Top routes (linear)", freq_css, "1 visit", f"{count_max_int} visits")}
+  {_row("legend-frequency", "Top routes (soft linear)", freq_css, "1 visit", f"{count_max_int} visits")}
   {
         _row(
             "legend-frequency-log",
@@ -106,6 +108,7 @@ def build_legend_html(  # noqa: PLR0913
   {_row("legend-elev-change", "Up vs down", _cmap_to_css(CMAP_ELEV), "descending", "ascending")}
   {_row("legend-hill", "Hill training (mean ascent / visit)", hill_css, "flat", f"≥{elev_gain_hi_int} cm/seg")}
   {_row("legend-recency", "Recency (most recent visit)", recency_css, date_lo_str, date_hi_str)}
+  {_row("legend-freshness-3mo", "Freshness (visits, last 3 mo; 14d boosted)", freq_css, "1", f"{recent_count_3mo_max_int} (log)")}
   {_row("legend-freshness", "Freshness (visits, last 12 mo)", freq_css, "1", f"{recent_count_max_int} (log)")}
   {_row("legend-freshness-36mo", "Freshness (visits, last 36 mo)", freq_css, "1", f"{recent_count_36mo_max_int} (log)")}
 </div>
