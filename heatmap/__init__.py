@@ -34,24 +34,24 @@ log = logging.getLogger(__name__)
 __all__ = ["Config", "configure_logging", "run", "sync_intervals_icu"]
 
 
-def sync_intervals_icu(config: Config) -> int:
+def sync_intervals_icu(config: Config) -> intervals_icu.SyncResult:
     """Sync intervals.icu activities into the local cache.
 
-    Skipped (returns 0) if `config.sync_enabled` is False, `HEATMAP_SKIP_SYNC=1`,
-    or `INTERVALS_ICU_API_KEY` is unset.
+    Skipped (empty result) if `config.sync_enabled` is False,
+    `HEATMAP_SKIP_SYNC=1`, or `INTERVALS_ICU_API_KEY` is unset.
     """
     if not config.sync_enabled:
         log.info("config.sync_enabled=False — skipping intervals.icu sync")
-        return 0
+        return intervals_icu.SyncResult(0, frozenset())
     if os.environ.get("HEATMAP_SKIP_SYNC"):
         log.info("HEATMAP_SKIP_SYNC set — skipping intervals.icu sync")
-        return 0
+        return intervals_icu.SyncResult(0, frozenset())
 
     api_key = os.environ.get("INTERVALS_ICU_API_KEY")
     athlete_id = os.environ.get("INTERVALS_ICU_ATHLETE_ID")
     if not api_key or not athlete_id:
         log.info("INTERVALS_ICU_API_KEY/ATHLETE_ID unset — skipping intervals.icu sync")
-        return 0
+        return intervals_icu.SyncResult(0, frozenset())
 
     return intervals_icu.sync(
         config.resolved_intervals_icu_cache_dir(),
@@ -98,8 +98,23 @@ def _union_min_zoom_from_df(df_all: object, config: Config) -> int | None:
     return max(0, _math.ceil(z_max - _math.log2(span_px / target_px)))
 
 
-def _confirm_full_rebuild(n_new: int) -> bool:
-    """Prompt the user before the slow track-parse + tile-pyramid rebuild.
+def _profile_type_values(types: list[str]) -> set[str]:
+    return {str(getattr(t, "value", t)) for t in types}
+
+
+def _profiles_changed_by_types(profiles: dict[str, list[str]], activity_types: frozenset[str]) -> set[str]:
+    """Return profiles whose activity-type filter overlaps changed types."""
+    if not activity_types:
+        return set(profiles)
+    return {
+        profile
+        for profile, types in profiles.items()
+        if not types or _profile_type_values(types).intersection(activity_types)
+    }
+
+
+def _confirm_full_rebuild(n_new: int, profiles_to_build: set[str], profiles_to_reuse: set[str]) -> bool:
+    """Prompt the user before track-parse + affected tile-pyramid rebuild.
 
     Returns True to proceed, False to abort. Auto-confirms when stdin is not
     a TTY (CI, piped input) or when HEATMAP_YES=1 is set.
@@ -108,8 +123,12 @@ def _confirm_full_rebuild(n_new: int) -> bool:
         return True
     print()
     print(f"  intervals.icu sync: {n_new} new activit{'y' if n_new == 1 else 'ies'}")
-    print("  Full rebuild parses all tracks and re-rasterises the tile pyramid")
-    print("  (typically a few minutes at z=17).")
+    if profiles_to_reuse:
+        print(f"  Rebuild profiles: {', '.join(sorted(profiles_to_build)) or 'none'}")
+        print(f"  Reuse cached profiles: {', '.join(sorted(profiles_to_reuse))}")
+    else:
+        print("  Rebuild all configured profiles.")
+    print("  Rebuild parses tracks and re-rasterises affected tile pyramids.")
     print("  For sync-only without rebuild, abort and run `make sync` instead.")
     print("  Set HEATMAP_YES=1 to skip this prompt.")
     try:
@@ -201,11 +220,37 @@ def run(config: Config) -> str:
             stats_by_profile[profile] = load_stats_panel_data(config.output_dir(), profile)
         return build_and_save(pyramid_by_profile, config, stats_by_profile=stats_by_profile)
 
-    n_new = sync_intervals_icu(config)
+    sync_result = sync_intervals_icu(config)
+    profiles_to_build = set(profiles)
+    profiles_to_reuse: set[str] = set()
+    if sync_result.downloaded and sync_result.activity_types:
+        profiles_to_build = _profiles_changed_by_types(profiles, sync_result.activity_types)
+        profiles_to_reuse = set(profiles) - profiles_to_build
 
-    if not _confirm_full_rebuild(n_new):
+    out_dir = config.output_dir()
+    results: dict[str, tuple[object, object]] = {}
+    for profile in list(profiles_to_reuse):
+        try:
+            results[profile] = (
+                load_pyramid_metadata(out_dir / "tiles" / profile),
+                load_stats_panel_data(out_dir, profile),
+            )
+            log.info("profile %r: reusing cached tile pyramid", profile)
+        except FileNotFoundError:
+            log.info("profile %r: cache missing, rebuilding", profile)
+            profiles_to_reuse.remove(profile)
+            profiles_to_build.add(profile)
+
+    if not _confirm_full_rebuild(sync_result.downloaded, profiles_to_build, profiles_to_reuse):
         log.info("Aborted before full rebuild. Run `make sync` for sync-only.")
         return ""
+
+    if not profiles_to_build:
+        pyramid_by_profile = {}
+        stats_by_profile = {}
+        for profile in profiles:
+            pyramid_by_profile[profile], stats_by_profile[profile] = results[profile]
+        return build_and_save(pyramid_by_profile, config, stats_by_profile=stats_by_profile)
 
     df_all, home_lat, home_lon = load_all(config)
     if df_all.empty:
@@ -223,6 +268,8 @@ def run(config: Config) -> str:
     # writers would corrupt it. Cheap when the cache is warm.
     tracks_by_profile: dict[str, list[Track]] = {}
     for profile, types in profiles.items():
+        if profile not in profiles_to_build:
+            continue
         log.info("==== profile %r (types=%s) ====", profile, types)
         runs = filter_for_profile(df_all, types, config, home_lat, home_lon)
         if runs.empty:
@@ -242,7 +289,7 @@ def run(config: Config) -> str:
 
         tracks_by_profile[profile] = tracks
 
-    if not tracks_by_profile:
+    if not tracks_by_profile and not results:
         msg = "No profile produced tracks — check filters."
         raise ValueError(msg)
 
@@ -250,9 +297,9 @@ def run(config: Config) -> str:
     # own outputs/tiles/<profile>/, so build them in separate processes. Wall
     # time drops to roughly the slowest single profile. Set HEATMAP_SERIAL=1 to
     # force the old sequential path (debugging / very low RAM).
-    out_dir = config.output_dir()
-    results: dict[str, tuple[object, object]] = {}
-    if len(tracks_by_profile) == 1 or os.environ.get("HEATMAP_SERIAL"):
+    if not tracks_by_profile:
+        log.info("No changed profile produced tracks; rendering cached profiles.")
+    elif len(tracks_by_profile) == 1 or os.environ.get("HEATMAP_SERIAL"):
         for profile, tracks in tracks_by_profile.items():
             _, pyr, stats_data = _build_profile(profile, tracks, out_dir, config, forced_min_zoom)
             results[profile] = (pyr, stats_data)
@@ -276,8 +323,9 @@ def run(config: Config) -> str:
     # would make the HTML's profile/radio order non-deterministic across runs.
     pyramid_by_profile: dict[str, object] = {}
     stats_by_profile: dict[str, object] = {}
-    for profile in tracks_by_profile:
-        pyramid_by_profile[profile], stats_by_profile[profile] = results[profile]
+    for profile in profiles:
+        if profile in results:
+            pyramid_by_profile[profile], stats_by_profile[profile] = results[profile]
 
     if not pyramid_by_profile:
         msg = "No profile produced tiles — check filters."

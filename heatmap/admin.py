@@ -226,11 +226,11 @@ def reimport_intervals(config: Config, activity_id: str) -> dict:
     else:
         date_from = date_to = date.today().isoformat()
 
-    n = intervals_icu.sync(
+    sync_result = intervals_icu.sync(
         cache_dir,
         athlete_id=athlete_id,
         api_key=api_key,
         date_from=date_from,
         date_to=date_to,
     )
-    return {"ok": True, "downloaded": n, "name": name, "date": date_iso}
+    return {"ok": True, "downloaded": sync_result.downloaded, "name": name, "date": date_iso}

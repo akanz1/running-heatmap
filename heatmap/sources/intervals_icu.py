@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import time
+from dataclasses import dataclass
 from datetime import date
 from datetime import timedelta
 from typing import Self
@@ -39,6 +40,12 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://intervals.icu/api/v1"
 LISTING_OLDEST_FALLBACK = "2010-01-01"
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    downloaded: int
+    activity_types: frozenset[str]
 
 
 class IntervalsIcuClient:
@@ -118,14 +125,15 @@ def sync(
     *,
     date_from: str | None = None,
     date_to: str | None = None,
-) -> int:
+) -> SyncResult:
     """Sync new intervals.icu activities into cache_dir.
 
     Listing range defaults to (latest cached start_date - 7 days) → today, or
     `date_from` → `date_to` if given. STRAVA-sourced activities are skipped
     (API can't serve their files).
 
-    Returns count of newly downloaded activities.
+    Returns download count plus canonical activity types for newly downloaded
+    activities.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     activities_dir = cache_dir / "activities"
@@ -152,19 +160,22 @@ def sync(
         to_download = [a for a in listing if a.get("source") != "STRAVA" and a["id"] not in known_ids]
         if not to_download:
             log.info("intervals.icu: nothing new")
-            return 0
+            return SyncResult(0, frozenset())
 
         n_new = 0
+        new_types: set[str] = set()
         for a in tqdm(to_download, desc="intervals.icu sync", unit="act"):
             fit_path = activities_dir / f"{a['id']}.fit"
             if not fit_path.exists():
                 fit_path.write_bytes(client.download_fit(a["id"]))
             index.append(_activity_to_entry(a))
+            raw_type = a.get("type") or ""
+            new_types.add(ACTIVITY_TYPE_ALIASES.get(raw_type, raw_type))
             n_new += 1
 
     _write_index(cache_dir, index)
     log.info("intervals.icu: downloaded %d new activities", n_new)
-    return n_new
+    return SyncResult(n_new, frozenset(new_types))
 
 
 def load(cache_dir: Path, excluded_ids: list[str] | None = None) -> pd.DataFrame:
