@@ -1,0 +1,3 @@
+ARG BUILD_ARCH=amd64
+FROM ghcr.io/home-assistant/${BUILD_ARCH}-base-python:3.12-alpine3.20
+RUN echo "Success!"
