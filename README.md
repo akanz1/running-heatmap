@@ -18,7 +18,6 @@ Grouped in the layer panel (top-right of the map):
 | Heart rate | Average | Red | Pixel-averaged HR; brighter = higher |
 | Elevation | Steepness | Green | `|grade|` — only the steep bits show |
 | Elevation | Up vs down | Green / purple | Direction; flats fade out |
-| Elevation | Hill training | Navy → red | Mean ascent per visit — where you've actually climbed |
 | Time | Recency | Viridis | Date of the most recent activity per pixel |
 | Time | Freshness 12 mo | Orange | Visits in the last 365 days |
 | Time | Freshness 36 mo | Orange | Same, 3-year window |
@@ -133,8 +132,6 @@ Edit `main.py` for the common knobs. Full list (defaults shown):
 | `map_opacity` | `0.85` | Heat layer opacity over basemap |
 | `recency_gamma` | `3.0` | Compress old dates into the dark end of the viridis ramp |
 | `altitude_smoothing_window` | `15` | Per-track centered moving-average over altitudes (filters GPS jitter) |
-| `hill_min_grade` | `0.025` | Minimum segment grade (2.5%) to count toward hill ascent |
-| `hill_blur_sigma_px` | `4` | Bigger blur for the hill layer specifically — merges parallel route variants |
 | `speed_min_ms` / `speed_max_ms` | `None` / `None` | Pace colormap range; None = auto-percentile |
 | `hr_min_bpm` / `hr_max_bpm` | `None` / `None` | Same for HR |
 | `auto_range_pct` | `5` | Percentile clip for auto-ranges |
@@ -204,7 +201,7 @@ Each pixel = mean across every activity that crossed it. A single hard effort ge
 
 ### Gradient layers depend on GPS altitude quality
 
-GPS altitude is noisy (±10–20 m vs ±3–5 m horizontal). `altitude_smoothing_window` (default 15) applies a centered moving average; `hill_min_grade` (default 2.5%) gates the hill accumulator. Reliable on hilly terrain, noisy on flats.
+GPS altitude is noisy (±10–20 m vs ±3–5 m horizontal). `altitude_smoothing_window` (default 15) applies a centered moving average before gradient calculation. Reliable on hilly terrain, noisy on flats.
 
 ### Coordinate systems
 

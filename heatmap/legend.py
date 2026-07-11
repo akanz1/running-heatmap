@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 from heatmap.colormaps import CMAP_COUNT
 from heatmap.colormaps import CMAP_ELEV
-from heatmap.colormaps import CMAP_HILL
 from heatmap.colormaps import CMAP_HR
 from heatmap.colormaps import CMAP_RECENCY
 from heatmap.colormaps import CMAP_SPEED
@@ -48,7 +47,6 @@ def build_legend_html(  # noqa: PLR0913
     hr_range: tuple[float, float],
     grad_range: tuple[float, float],
     count_max: float,
-    elev_gain_hi: float,
     date_range_days: tuple[float, float],
     recent_count_3mo_max: float,
     recent_count_max: float,
@@ -62,15 +60,12 @@ def build_legend_html(  # noqa: PLR0913
     recent_count_3mo_max_int = max(1, int(recent_count_3mo_max))
     recent_count_max_int = max(1, int(recent_count_max))
     recent_count_36mo_max_int = max(1, int(recent_count_36mo_max))
-    elev_gain_hi_int = max(1, int(elev_gain_hi * 100))  # cm/segment → readable scale
-
     date_lo_str = (_EPOCH + timedelta(days=int(d_lo))).isoformat() if d_lo > 0 else "—"
     date_hi_str = (_EPOCH + timedelta(days=int(d_hi))).isoformat() if d_hi > 0 else "—"
 
     freq_css = _cmap_to_css(CMAP_COUNT)
     pace_css = _cmap_to_css(CMAP_SPEED)
     hr_css = _cmap_to_css(CMAP_HR)
-    hill_css = _cmap_to_css(CMAP_HILL)
     recency_css = _cmap_to_css(CMAP_RECENCY)
 
     return f"""
@@ -106,7 +101,6 @@ def build_legend_html(  # noqa: PLR0913
         )
     }
   {_row("legend-elev-change", "Up vs down", _cmap_to_css(CMAP_ELEV), "descending", "ascending")}
-  {_row("legend-hill", "Hill training (mean ascent / visit)", hill_css, "flat", f"≥{elev_gain_hi_int} cm/seg")}
   {_row("legend-recency", "Recency (most recent visit)", recency_css, date_lo_str, date_hi_str)}
   {_row("legend-freshness-3mo", "Freshness (visits, last 3 mo; 14d boosted)", freq_css, "1", f"{recent_count_3mo_max_int} (log)")}
   {_row("legend-freshness", "Freshness (visits, last 12 mo)", freq_css, "1", f"{recent_count_max_int} (log)")}

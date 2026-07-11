@@ -150,20 +150,10 @@ class Config:
     recency_gamma: float = 3.0
 
     # Per-track altitude smoothing window (odd number of points, centered
-    # moving average). GPS altitude jitter is the main source of false hills;
+    # moving average). GPS altitude jitter is the main source of false gradients;
     # smoothing each track's altitude before computing segment deltas removes
     # most of it. Affects all elevation-derived layers. 1 = no smoothing.
     altitude_smoothing_window: int = 15
-
-    # Minimum segment grade (rise / run) to count as ascent. Filters GPS
-    # altitude noise (~0.5 m per second of jitter) on flat terrain.
-    # 0.025 = 2.5 %, light slopes included.
-    hill_min_grade: float = 0.025
-
-    # Blur sigma for the hill layer specifically (px at each zoom). Slightly
-    # larger than the global blur_sigma_px so parallel route variants within
-    # a few metres merge into one line at z=max.
-    hill_blur_sigma_px: int = 4
 
     # --- Colour range — None = auto (percentile clipped) --------------------
     speed_min_ms: float | None = None

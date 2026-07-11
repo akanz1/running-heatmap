@@ -131,8 +131,6 @@ _FINGERPRINT_CONFIG_FIELDS = (
     "blur_sigma_px",
     "recency_gamma",
     "altitude_smoothing_window",
-    "hill_min_grade",
-    "hill_blur_sigma_px",
     "speed_min_ms",
     "speed_max_ms",
     "hr_min_bpm",
@@ -155,7 +153,7 @@ def _profile_input_fingerprint(
     forced_min_zoom: int | None,
 ) -> str:
     payload = {
-        "version": 4,
+        "version": 5,
         "profile": profile,
         "types": sorted(_profile_type_values(types)),
         "forced_min_zoom": forced_min_zoom,
@@ -237,6 +235,8 @@ def _clip_tracks(
         if mask.any():
             clipped.append(
                 Track(
+                    activity_id=t.activity_id,
+                    activity_type=t.activity_type,
                     label=t.label,
                     date_days=t.date_days,
                     distance_m=t.distance_m,

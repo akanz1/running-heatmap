@@ -156,7 +156,6 @@ def build_and_save(
                 hr_range=default_pyramid.hr_range,
                 grad_range=default_pyramid.grad_range,
                 count_max=default_pyramid.count_max,
-                elev_gain_hi=default_pyramid.elev_gain_hi,
                 date_range_days=default_pyramid.date_range_days,
                 recent_count_3mo_max=default_pyramid.recent_count_3mo_max,
                 recent_count_max=default_pyramid.recent_count_max,

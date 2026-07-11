@@ -29,6 +29,8 @@ _EPOCH = date(1970, 1, 1)
 
 @dataclass
 class Track:
+    activity_id: str
+    activity_type: str
     label: str
     date_days: int  # days since 1970-01-01, for per-pixel max-date tiles
     distance_m: float | None
@@ -105,6 +107,8 @@ def load_tracks(
 
         tracks.append(
             Track(
+                activity_id=str(row["activity_id"]),
+                activity_type=str(row["type"]),
                 label=f"{row['date'].date()} {row['name']}",
                 date_days=(row["date"].date() - _EPOCH).days,
                 distance_m=row.get("distance_m"),

@@ -30,7 +30,6 @@ LAYERS: list[tuple[str, str, str, str, bool]] = [
     ("Heart rate", "Average", "hr", "legend-heart-rate-avg", False),
     ("Elevation", "Steepness", "grad", "legend-gradient", False),
     ("Elevation", "Up vs down", "elev", "legend-elev-change", False),
-    ("Elevation", "Hill training", "hill", "legend-hill", False),
 ]
 
 

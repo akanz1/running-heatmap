@@ -21,10 +21,10 @@ config = Config(
     # Set to None to fall back to `activity_types` (single profile "all").
     # Empty list = no type filter → every activity in one layer.
     activity_type_profiles={
+        "all":        [ActivityType.RUN, ActivityType.TRAIL_RUN, ActivityType.HIKE],
         "runs":       [ActivityType.RUN],
         "trail_runs": [ActivityType.TRAIL_RUN],
         "hikes":      [ActivityType.HIKE],
-        "all":        [ActivityType.RUN, ActivityType.TRAIL_RUN, ActivityType.HIKE],
     },
     # Date filter (YYYY-MM-DD strings); None = unbounded.
     date_from=None,

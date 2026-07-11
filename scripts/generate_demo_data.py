@@ -7,8 +7,8 @@ favourites that any real runner's heatmap has. A smaller pool of one-off
 random walks adds variety.
 
 Elevation is sampled from a single shared spatial field f(lat, lon), so every
-track passing through the same area sees the same hills. Hill / steepness /
-elevation layers therefore aggregate cleanly across visits, the way they do
+track passing through the same area sees the same hills. Steepness / elevation
+layers therefore aggregate cleanly across visits, the way they do
 on real terrain.
 
 Each activity gets:
@@ -74,7 +74,7 @@ ONE_OFF_WEIGHTS = [0.55, 0.2, 0.15, 0.1]
 # --------------------------------------------------------------------------- #
 # Shared elevation field. Deterministic f(lat, lon) → metres.
 # Sum of a few low-frequency sines so any two tracks crossing the same point
-# see the same altitude; the hill layer thus accumulates consistently.
+# see the same altitude; elevation layers thus aggregate consistently.
 # --------------------------------------------------------------------------- #
 
 
