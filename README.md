@@ -4,7 +4,7 @@ Writeup: [akanz.de/posts/running-heatmap](https://www.akanz.de/posts/running-hea
 
 Turns a Strava data export (and optionally an intervals.icu API key) into an interactive heatmap. Renders sharply at every zoom from continent view down to street level. No live API needed for the base case — just the zip Strava lets you download.
 
-Output is a static HTML file plus a pre-baked tile pyramid (`outputs/tiles/{layer}/{z}/{x}/{y}.png`). Ten heatmap layers + five basemaps + an in-browser stats panel; layer/basemap switching is instant.
+Output is a static HTML file, a pre-baked tile pyramid (`outputs/tiles/{layer}/{z}/{x}/{y}.png`), and compact simplified activity geometry (`outputs/routes.json`). Ten heatmap layers + five basemaps + an in-browser stats panel; layer/basemap switching is instant.
 
 ## Layers
 
@@ -14,10 +14,10 @@ Grouped in the layer panel (top-right of the map):
 |---|---|---|---|
 | Frequency | Top routes | Orange | Visit count, linear — favourite routes dominate |
 | Frequency | All routes (default) | Orange | Visit count, log scale — every path stays visible |
-| Pace | Average | Blue | Pixel-averaged pace; brighter = faster |
-| Heart rate | Average | Red | Pixel-averaged HR; brighter = higher |
-| Elevation | Steepness | Green | `|grade|` — only the steep bits show |
-| Elevation | Up vs down | Green / purple | Direction; flats fade out |
+| Metrics | Pace | Blue | Pixel-averaged pace; brighter = faster |
+| Metrics | Heart rate | Red | Pixel-averaged HR; brighter = higher |
+| Metrics | Steepness | Green | `|grade|` — only the steep bits show |
+| Metrics | Uphill / downhill | Green / purple | Direction; flats fade out |
 | Time | Recency | Viridis | Date of the most recent activity per pixel |
 | Time | Freshness 12 mo | Orange | Visits in the last 365 days |
 | Time | Freshness 36 mo | Orange | Same, 3-year window |
@@ -53,6 +53,8 @@ Two sources, in any combination:
 5. `make serve` — open `http://localhost:8000/heatmap.html`.
 
 Basemap, heatmap layer, and stats panel are all in the viewer — no rebuild needed to switch.
+
+The **View** toggle switches between the pre-rendered Heatmap and individual Routes. Routes load lazily from `routes.json`, use cyan / green / orange for runs / trail runs / hikes, and expose per-type checkboxes. Stroke width and opacity adapt to zoom; world/continent views add a broad low-opacity presence glow so sub-pixel routes remain visible and overlapping activity locations intensify. Date and distance filters update drawn routes + totals live. Hover adds a high-contrast route halo; click locks its details. Highlighted routes show 1 km markers at street/city zoom and 5 km markers at wider regional zoom. Routes is the default view and allows one extra vector-only zoom level; Heatmap remains capped at its highest rendered tile zoom.
 
 ### Optional: intervals.icu sync
 
@@ -104,7 +106,7 @@ Add more by appending to `_BASEMAPS` in [heatmap/basemaps.py](heatmap/basemaps.p
 
 ### Stats panel + sliders
 
-Floating panel (bottom-left). Shows count / total km / total hours / total ascent for the selected activity window. Two dual-handle range sliders (date and distance) filter the totals live — the heatmap tiles are pre-baked so the map itself doesn't change.
+Floating panel (bottom-left). Shows count / total km / total hours / total ascent for the selected activity window. Two dual-handle range sliders filter totals live. In Routes view they also filter drawn activities; raster heatmap tiles remain pre-baked and do not change.
 
 For build-time filtering of the actual map, use `Config(date_from=, date_to=, activity_types=)`.
 
@@ -170,6 +172,10 @@ The same activity may be in both `strava_export/` and `cache/intervals_icu/`. Ma
 ### Iterating on the HTML only
 
 `make run-html-only` reuses the tile pyramid and `_activities.json` sidecar, regenerating just `outputs/heatmap.html` in ~1 s — useful when tweaking the panel / legend / colours.
+
+### Browser route export
+
+Each full build writes `outputs/routes.json`: activity metadata plus GPS geometry simplified to a 5 m tolerance. This keeps individual routes available for browser-side filtering and interaction without shipping the full parse cache.
 
 ### Track formats
 

@@ -26,10 +26,17 @@ LAYERS: list[tuple[str, str, str, str, bool]] = [
     ("Time", "Freshness 3 mo", "freshness_3mo", "legend-freshness-3mo", False),
     ("Time", "Freshness 12 mo", "freshness", "legend-freshness", False),
     ("Time", "Freshness 36 mo", "freshness_36mo", "legend-freshness-36mo", False),
-    ("Pace", "Average", "speed", "legend-pace-avg", False),
-    ("Heart rate", "Average", "hr", "legend-heart-rate-avg", False),
-    ("Elevation", "Steepness", "grad", "legend-gradient", False),
-    ("Elevation", "Up vs down", "elev", "legend-elev-change", False),
+    ("Metrics", "Pace", "speed", "legend-pace-avg", False),
+    ("Metrics", "Heart rate", "hr", "legend-heart-rate-avg", False),
+    ("Metrics", "Steepness", "grad", "legend-gradient", False),
+    ("Metrics", "Uphill / downhill", "elev", "legend-elev-change", False),
+]
+
+# (canonical activity type, display label, route colour)
+ROUTE_TYPES = [
+    ("Run", "Runs", "#22d3ee"),
+    ("Trail Run", "Trail runs", "#4ade80"),
+    ("Hike", "Hikes", "#fb923c"),
 ]
 
 
@@ -59,22 +66,84 @@ _PANEL_CSS = """
     color: #eee; font-weight: 600; margin: 2px 0;
     cursor: pointer;
   }
-  #layer-panel input[type=radio] { accent-color: #eee; cursor: pointer; }
+  #layer-panel input[type=radio],
+  #layer-panel input[type=checkbox] { accent-color: #eee; cursor: pointer; }
+  #layer-panel .mode-toggle {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 3px;
+    padding: 3px; border-radius: 7px;
+    background: rgba(255,255,255,0.07);
+  }
+  #layer-panel .mode-toggle label { margin: 0; }
+  #layer-panel .mode-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+  #layer-panel .mode-toggle span {
+    display: block; width: 100%; padding: 4px 7px; border-radius: 5px;
+    text-align: center; color: #aaa; box-sizing: border-box;
+  }
+  #layer-panel .mode-toggle input:checked + span {
+    background: rgba(255,255,255,0.15); color: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+  }
+  #layer-panel .route-swatch {
+    width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px;
+    box-shadow: 0 0 5px currentColor;
+  }
+  #layer-panel .routes-only { display: none; }
+  #route-status { color: #888; font-size: 10px; margin-top: 5px; }
+  .route-tooltip.leaflet-tooltip {
+    background: rgba(15,15,15,0.94); color: #eee;
+    border: 1px solid rgba(255,255,255,0.14); border-radius: 7px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.55); padding: 7px 9px;
+  }
+  .route-tooltip.leaflet-tooltip:before { display: none; }
+  .route-popup .leaflet-popup-content-wrapper,
+  .route-popup .leaflet-popup-tip {
+    background: rgba(15,15,15,0.96); color: #eee;
+  }
+  .route-popup .leaflet-popup-content { margin: 11px 13px; }
+  .route-detail-title { font-weight: 700; margin-bottom: 3px; }
+  .route-detail-meta { color: #bbb; line-height: 1.5; }
+  .km-marker { background: transparent; border: 0; pointer-events: none; }
+  .km-marker span {
+    display: flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%; box-sizing: border-box;
+    background: rgba(15,15,15,0.92); color: #fff; font: 700 9px/1 sans-serif;
+    border: 2px solid currentColor; box-shadow: 0 1px 5px rgba(0,0,0,0.7);
+  }
 </style>
 """
 
 
 def _panel_html(profiles: list[str], default_profile: str) -> str:
-    rows = []
+    rows = [
+        '<div class="group-title">View</div>',
+        '<div class="mode-toggle">',
+        '<label><input type="radio" name="map-mode" value="heatmap"><span>Heatmap</span></label>',
+        '<label><input type="radio" name="map-mode" value="routes" checked><span>Routes</span></label>',
+        "</div>",
+        '<div class="divider"></div>',
+    ]
 
     # Activity profile (hidden if only one profile, no point cluttering the UI)
     if len(profiles) > 1:
+        rows.append('<div class="heatmap-only">')
         rows.append('<div class="group-title">Activity</div>')
         for p in profiles:
             checked = "checked" if p == default_profile else ""
             label = p.replace("_", " ").title()
             rows.append(f'<label><input type="radio" name="profile" value="{p}" {checked}><span>{label}</span></label>')
-        rows.append('<div class="divider"></div>')
+        rows.append("</div>")
+        rows.append('<div class="divider heatmap-only"></div>')
+
+    rows.append('<div class="routes-only">')
+    rows.append('<div class="group-title">Activity types</div>')
+    for activity_type, label, colour in ROUTE_TYPES:
+        rows.append(
+            f'<label><input type="checkbox" name="route-type" value="{activity_type}" checked>'
+            f'<span class="route-swatch" style="background:{colour};color:{colour}"></span><span>{label}</span></label>'
+        )
+    rows.append('<div id="route-status">Select Routes to load activities</div>')
+    rows.append("</div>")
+    rows.append('<div class="divider routes-only"></div>')
 
     rows.append('<div class="group-title">Basemap</div>')
     for i, b in enumerate(available_basemaps()):
@@ -84,6 +153,7 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
         )
     rows.append('<div class="divider"></div>')
 
+    rows.append('<div class="heatmap-only">')
     last_group = None
     for group, display, subdir, _legend_id, visible in LAYERS:
         if group != last_group:
@@ -93,6 +163,7 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
         rows.append(
             f'<label><input type="radio" name="heatmap-layer" value="{subdir}" {checked}><span>{display}</span></label>'
         )
+    rows.append("</div>")
     return '<div id="layer-panel">\n' + "\n".join(rows) + "\n</div>"
 
 
@@ -106,11 +177,17 @@ def _basemap_meta_json() -> str:
     return json.dumps({b.key: b.url_match for b in available_basemaps()})
 
 
+def _route_type_meta_json() -> str:
+    """Canonical activity type → route colour."""
+    return json.dumps({activity_type: {"colour": colour} for activity_type, _, colour in ROUTE_TYPES})
+
+
 _PANEL_JS_TMPL = """
 <script>
 (function() {
   var LAYER_META = __LAYER_META__;
   var BASEMAP_META = __BASEMAP_META__;
+  var ROUTE_TYPE_META = __ROUTE_TYPE_META__;
 
   function findMap() {
     for (var k in window) {
@@ -179,7 +256,20 @@ _PANEL_JS_TMPL = """
     if (!mapObj) { setTimeout(setup, 100); return; }
     var layersByProfile = indexHeatmapLayers();
     var basemaps = indexBasemaps();
+    var routeRenderer = L.canvas({padding: 0.5, tolerance: 6});
+    var routeGlowGroup = L.layerGroup();
+    var routeGroup = L.layerGroup();
+    var highlightGroup = L.layerGroup();
+    var routeRecords = [];
+    var routesPromise = null;
+    var routeFiltersInitialized = false;
+    var selectedRoute = null;
+    var hoveredRoute = null;
+    var heatmapMaxZoom = mapObj.getMaxZoom();
+    var routesMaxZoom = heatmapMaxZoom + 1;
 
+    var modeInput = document.querySelector('input[name="map-mode"]:checked');
+    var activeMode = modeInput ? modeInput.value : "routes";
     var profileInput = document.querySelector('input[name="profile"]:checked');
     var activeProfile = profileInput ? profileInput.value
                                      : Object.keys(layersByProfile)[0];
@@ -187,13 +277,304 @@ _PANEL_JS_TMPL = """
     var layerInput = document.querySelector('input[name="heatmap-layer"]:checked');
     var activeLayer = layerInput ? layerInput.value : "count_log";
 
+    function routeStyle(activityType) {
+      var zoom = mapObj.getZoom();
+      var weight = zoom <= 3 ? 8.0 : zoom <= 5 ? 4.0 : zoom <= 8 ? 2.5 : zoom <= 11 ? 1.7 : zoom <= 14 ? 1.8 : zoom <= 16 ? 2.4 : 3.2;
+      var opacity = zoom <= 3 ? 1.0 : zoom <= 5 ? 0.90 : zoom <= 8 ? 0.65 : zoom <= 11 ? 0.38 : zoom <= 14 ? 0.36 : zoom <= 16 ? 0.44 : 0.54;
+      return {
+        color: ROUTE_TYPE_META[activityType].colour,
+        weight: weight,
+        opacity: opacity,
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: true,
+        bubblingMouseEvents: false,
+        renderer: routeRenderer
+      };
+    }
+
+    function routeGlowStyle(activityType) {
+      var zoom = mapObj.getZoom();
+      return {
+        color: ROUTE_TYPE_META[activityType].colour,
+        weight: zoom <= 3 ? 24 : zoom <= 5 ? 14 : zoom <= 8 ? 8 : 1,
+        opacity: zoom <= 3 ? 0.28 : zoom <= 5 ? 0.22 : zoom <= 8 ? 0.15 : 0,
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false,
+        renderer: routeRenderer
+      };
+    }
+
+    function segmentDistanceM(a, b) {
+      var earthRadiusM = 6371000;
+      var lat1 = a[0] * Math.PI / 180, lat2 = b[0] * Math.PI / 180;
+      var dLat = lat2 - lat1, dLon = (b[1] - a[1]) * Math.PI / 180;
+      var h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+      return earthRadiusM * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    }
+
+    function kilometerPoints(activity) {
+      if (activity.__kilometerPoints) return activity.__kilometerPoints;
+      var marks = [], points = activity.points, travelledM = 0, nextM = 1000;
+      for (var i = 1; i < points.length; i++) {
+        var start = points[i - 1], end = points[i];
+        var segmentM = segmentDistanceM(start, end);
+        if (!segmentM) continue;
+        while (travelledM + segmentM >= nextM) {
+          var fraction = (nextM - travelledM) / segmentM;
+          marks.push({
+            km: nextM / 1000,
+            latlng: [start[0] + (end[0] - start[0]) * fraction,
+                     start[1] + (end[1] - start[1]) * fraction]
+          });
+          nextM += 1000;
+        }
+        travelledM += segmentM;
+      }
+      activity.__kilometerPoints = marks;
+      return marks;
+    }
+
+    function clearRouteHighlight() {
+      if (mapObj.hasLayer(highlightGroup)) mapObj.removeLayer(highlightGroup);
+      highlightGroup.clearLayers();
+    }
+
+    function showRouteHighlight(record) {
+      clearRouteHighlight();
+      if (!record || activeMode !== "routes") return;
+      var activity = record.activity;
+      var style = routeStyle(activity.type);
+      L.polyline(activity.points, {
+        color: "#fff", weight: style.weight + 6, opacity: 0.60,
+        lineCap: "round", lineJoin: "round", interactive: false
+      }).addTo(highlightGroup);
+      L.polyline(activity.points, {
+        color: style.color, weight: style.weight + 2.5, opacity: 1,
+        lineCap: "round", lineJoin: "round", interactive: false
+      }).addTo(highlightGroup);
+
+      var markerStepKm = mapObj.getZoom() >= 13 ? 1 : mapObj.getZoom() >= 10 ? 5 : 0;
+      if (markerStepKm) {
+        kilometerPoints(activity).forEach(function(mark) {
+          if (mark.km % markerStepKm) return;
+          var icon = L.divIcon({
+            className: "km-marker",
+            html: '<span style="border-color:' + style.color + '">' + mark.km + '</span>',
+            iconSize: [20, 20], iconAnchor: [10, 10]
+          });
+          L.marker(mark.latlng, {icon: icon, interactive: false, keyboard: false}).addTo(highlightGroup);
+        });
+      }
+      highlightGroup.addTo(mapObj);
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, function(character) {
+        return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character];
+      });
+    }
+
+    function formatDate(days) {
+      return new Date(Date.UTC(1970, 0, 1) + days * 86400000).toISOString().slice(0, 10);
+    }
+
+    function formatDuration(seconds) {
+      if (!seconds) return "—";
+      var totalMinutes = Math.round(seconds / 60);
+      var hours = Math.floor(totalMinutes / 60);
+      var minutes = totalMinutes % 60;
+      return hours ? hours + " h " + minutes + " min" : minutes + " min";
+    }
+
+    function formatPace(activity) {
+      if (!activity.distance_m || !activity.moving_time_s) return "—";
+      var totalSeconds = Math.round(activity.moving_time_s / (activity.distance_m / 1000));
+      var minutes = Math.floor(totalSeconds / 60);
+      return minutes + ":" + String(totalSeconds % 60).padStart(2, "0") + " /km";
+    }
+
+    function activityDetails(activity) {
+      var title = activity.label.replace(/^\\d{4}-\\d{2}-\\d{2}\\s+/, "");
+      var distance = activity.distance_m ? (activity.distance_m / 1000).toFixed(1) + " km" : "—";
+      var elevation = activity.elevation_gain_m == null ? "—" : Math.round(activity.elevation_gain_m) + " m";
+      return '<div class="route-detail-title">' + escapeHtml(title) + '</div>' +
+        '<div class="route-detail-meta">' + escapeHtml(activity.type) + ' · ' + formatDate(activity.date_days) + '<br>' +
+        distance + ' · ' + formatDuration(activity.moving_time_s) + ' · ' + formatPace(activity) +
+        '<br>Elevation ' + elevation + '</div>';
+    }
+
+    function setRouteStatus(message) {
+      var status = document.getElementById("route-status");
+      if (status) status.textContent = message;
+    }
+
+    function loadRoutes() {
+      if (routesPromise) return routesPromise;
+      setRouteStatus("Loading activities…");
+      routesPromise = fetch("routes.json")
+        .then(function(response) {
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          return response.json();
+        })
+        .then(function(payload) {
+          var loaded = 0;
+          payload.activities.forEach(function(activity) {
+            if (!ROUTE_TYPE_META[activity.type] || !activity.points || activity.points.length < 2) return;
+            var record = {activity: activity, layer: null, glowLayer: null};
+            var layer = L.polyline(activity.points, routeStyle(activity.type));
+            record.layer = layer;
+            record.glowLayer = L.polyline(activity.points, routeGlowStyle(activity.type));
+            layer.bindTooltip(activityDetails(activity), {sticky: true, direction: "top", className: "route-tooltip"});
+            layer.on("mouseover", function() {
+              hoveredRoute = record;
+              showRouteHighlight(record);
+            });
+            layer.on("mouseout", function() {
+              hoveredRoute = null;
+              if (selectedRoute) showRouteHighlight(selectedRoute);
+              else clearRouteHighlight();
+            });
+            layer.on("click", function(event) {
+              mapObj.closePopup();
+              selectedRoute = record;
+              showRouteHighlight(record);
+              L.popup({className: "route-popup", maxWidth: 280})
+                .setLatLng(event.latlng)
+                .setContent(activityDetails(activity))
+                .openOn(mapObj);
+            });
+            routeRecords.push(record);
+            loaded += 1;
+          });
+          setRouteStatus(loaded + " activities loaded");
+          return routeRecords;
+        })
+        .catch(function(error) {
+          setRouteStatus("Routes unavailable · run make run");
+          throw error;
+        });
+      return routesPromise;
+    }
+
+    function hideRoutes() {
+      if (mapObj.hasLayer(routeGlowGroup)) mapObj.removeLayer(routeGlowGroup);
+      if (mapObj.hasLayer(routeGroup)) mapObj.removeLayer(routeGroup);
+      hoveredRoute = null;
+      clearRouteHighlight();
+    }
+
+    function enabledRouteTypes() {
+      var enabled = {};
+      document.querySelectorAll('input[name="route-type"]:checked').forEach(function(input) {
+        enabled[input.value] = true;
+      });
+      return enabled;
+    }
+
+    function routeStatsActivities() {
+      var enabled = enabledRouteTypes();
+      return routeRecords
+        .filter(function(record) { return enabled[record.activity.type]; })
+        .map(function(record) {
+          var activity = record.activity;
+          return {d: activity.date_days, km: activity.distance_m || 0, s: activity.moving_time_s || 0,
+                  el: activity.elevation_gain_m || 0};
+        });
+    }
+
+    function syncRouteStats(resetRanges) {
+      if (window.__statsPanelSetRouteActivities__) {
+        window.__statsPanelSetRouteActivities__(routeStatsActivities(), resetRanges);
+      }
+    }
+
+    function applyRouteFilters() {
+      if (activeMode !== "routes") return;
+      var enabled = enabledRouteTypes();
+      var filters = window.__statsPanelGetFilters__ ? window.__statsPanelGetFilters__() : null;
+      routeGlowGroup.clearLayers();
+      routeGroup.clearLayers();
+      var visible = 0;
+      var visibleRecords = [];
+      routeRecords.forEach(function(record) {
+        var activity = record.activity;
+        var distance = activity.distance_m || 0;
+        if (!enabled[activity.type]) return;
+        if (filters && (activity.date_days < filters.date_min_days || activity.date_days > filters.date_max_days)) return;
+        if (filters && (distance < filters.distance_min_m || distance > filters.distance_max_m)) return;
+        visibleRecords.push(record);
+        visible += 1;
+      });
+      visibleRecords.forEach(function(record) { routeGlowGroup.addLayer(record.glowLayer); });
+      visibleRecords.forEach(function(record) { routeGroup.addLayer(record.layer); });
+      if (!mapObj.hasLayer(routeGlowGroup)) routeGlowGroup.addTo(mapObj);
+      if (!mapObj.hasLayer(routeGroup)) routeGroup.addTo(mapObj);
+      setRouteStatus(visible + " of " + routeRecords.length + " activities visible");
+      if (hoveredRoute && !routeGroup.hasLayer(hoveredRoute.layer)) hoveredRoute = null;
+      if (selectedRoute && !routeGroup.hasLayer(selectedRoute.layer)) mapObj.closePopup();
+      else if (hoveredRoute || selectedRoute) showRouteHighlight(hoveredRoute || selectedRoute);
+    }
+
+    function showRoutes() {
+      applyRouteFilters();
+    }
+
+    function updateRouteStyles() {
+      routeRecords.forEach(function(record) {
+        record.glowLayer.setStyle(routeGlowStyle(record.activity.type));
+        record.layer.setStyle(routeStyle(record.activity.type));
+      });
+      if (hoveredRoute || selectedRoute) showRouteHighlight(hoveredRoute || selectedRoute);
+    }
+
+    function setModeUI() {
+      document.querySelectorAll(".heatmap-only").forEach(function(el) {
+        el.style.display = activeMode === "heatmap" ? "" : "none";
+      });
+      document.querySelectorAll(".routes-only").forEach(function(el) {
+        el.style.display = activeMode === "routes" ? "block" : "none";
+      });
+      var legend = document.getElementById("heatmap-legend");
+      if (legend) legend.style.display = activeMode === "heatmap" ? "" : "none";
+      var stats = document.getElementById("stats-panel");
+      if (stats) stats.style.display = "";
+    }
+
     function applyActive() {
-      showHeatmap(mapObj, layersByProfile, activeProfile, activeLayer);
-      showLegend(activeLayer);
-      if (window.__statsPanelSetProfile__) window.__statsPanelSetProfile__(activeProfile);
+      setModeUI();
+      if (activeMode === "heatmap") {
+        mapObj.setMaxZoom(heatmapMaxZoom);
+        if (mapObj.getZoom() > heatmapMaxZoom) mapObj.setZoom(heatmapMaxZoom);
+        mapObj.closePopup();
+        hideRoutes();
+        routeFiltersInitialized = false;
+        showHeatmap(mapObj, layersByProfile, activeProfile, activeLayer);
+        showLegend(activeLayer);
+        if (window.__statsPanelSetProfile__) window.__statsPanelSetProfile__(activeProfile);
+      } else {
+        mapObj.setMaxZoom(routesMaxZoom);
+        hideAllHeatmap(mapObj, layersByProfile);
+        showLegend(null);
+        loadRoutes().then(function() {
+          if (activeMode === "routes") {
+            syncRouteStats(!routeFiltersInitialized);
+            routeFiltersInitialized = true;
+            showRoutes();
+          }
+        }).catch(function() {});
+      }
     }
 
     applyActive();
+
+    document.querySelectorAll('input[name="map-mode"]').forEach(function(input) {
+      input.addEventListener('change', function() {
+        activeMode = input.value;
+        applyActive();
+      });
+    });
 
     document.querySelectorAll('input[name="heatmap-layer"]').forEach(function(input) {
       input.addEventListener('change', function() {
@@ -206,6 +587,26 @@ _PANEL_JS_TMPL = """
         activeProfile = input.value;
         applyActive();
       });
+    });
+    document.querySelectorAll('input[name="route-type"]').forEach(function(input) {
+      input.addEventListener('change', function() {
+        if (activeMode === "routes") {
+          syncRouteStats(false);
+          showRoutes();
+        }
+      });
+    });
+    window.addEventListener("activityfilterschange", function() {
+      if (activeMode === "routes") applyRouteFilters();
+    });
+    mapObj.on("zoomend", function() {
+      if (activeMode === "routes") updateRouteStyles();
+    });
+    mapObj.on("popupclose", function() {
+      if (!selectedRoute) return;
+      selectedRoute = null;
+      if (hoveredRoute) showRouteHighlight(hoveredRoute);
+      else clearRouteHighlight();
     });
 
     // Basemap radios — show one, hide the other. Layers must sit below the
@@ -235,4 +636,5 @@ _PANEL_JS_TMPL = """
 def build_layer_panel_html(profiles: list[str], default_profile: str) -> str:
     js = _PANEL_JS_TMPL.replace("__LAYER_META__", _layer_meta_json())
     js = js.replace("__BASEMAP_META__", _basemap_meta_json())
+    js = js.replace("__ROUTE_TYPE_META__", _route_type_meta_json())
     return _PANEL_CSS + _panel_html(profiles, default_profile) + js

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 
 from heatmap.layer_panel import LAYERS
+from heatmap.layer_panel import build_layer_panel_html
+from heatmap.routes import save_routes
+from heatmap.stats_panel import StatsPanelData
+from heatmap.stats_panel import build_stats_panel_html
 from heatmap.config import Config
 from heatmap.tiles import build_pyramid
 from heatmap.tracks import Track
@@ -70,6 +75,75 @@ class ProductChangeTests(unittest.TestCase):
 
         self.assertEqual(tracks[0].activity_id, "icu-i1")
         self.assertEqual(tracks[0].activity_type, "Trail Run")
+
+    def test_route_export_simplifies_geometry_and_keeps_metadata(self) -> None:
+        track = Track(
+            activity_id="strava-1",
+            activity_type="Run",
+            label="2026-06-17 Morning Run",
+            date_days=20_000,
+            distance_m=float("nan"),
+            moving_time_s=300,
+            elevation_gain_m=20,
+            points=[
+                [49.0, 8.0, 3.0, 140, 100.0],
+                [49.0005, 8.0005, 3.0, 140, 102.0],
+                [49.001, 8.001, 3.0, 140, 105.0],
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = save_routes([track], Path(tmp), input_fingerprint="abc")
+            payload = json.loads(path.read_text())
+
+        self.assertEqual(payload["input_fingerprint"], "abc")
+        self.assertEqual(payload["raw_point_count"], 3)
+        self.assertEqual(payload["point_count"], 2)
+        self.assertEqual(payload["activities"][0]["id"], "strava-1")
+        self.assertEqual(payload["activities"][0]["type"], "Run")
+        self.assertIsNone(payload["activities"][0]["distance_m"])
+        self.assertEqual(payload["activities"][0]["points"], [[49.0, 8.0], [49.001, 8.001]])
+
+    def test_layer_panel_includes_heatmap_and_routes_modes(self) -> None:
+        html = build_layer_panel_html(["all", "runs", "trail_runs", "hikes"], "all")
+
+        self.assertIn('name="map-mode" value="heatmap"', html)
+        self.assertIn('name="map-mode" value="routes" checked', html)
+        self.assertIn('modeInput ? modeInput.value : "routes"', html)
+        self.assertIn('name="route-type" value="Run" checked', html)
+        self.assertIn('name="route-type" value="Trail Run" checked', html)
+        self.assertIn('name="route-type" value="Hike" checked', html)
+        self.assertIn('<div class="group-title">Metrics</div>', html)
+        self.assertIn('<span>Pace</span>', html)
+        self.assertIn('<span>Heart rate</span>', html)
+        self.assertIn('<span>Uphill / downhill</span>', html)
+        self.assertNotIn('<span>Average</span>', html)
+        self.assertIn('fetch("routes.json")', html)
+        self.assertIn("L.canvas({padding: 0.5, tolerance: 6})", html)
+        self.assertIn("zoom <= 3 ? 8.0", html)
+        self.assertIn("function routeGlowStyle(activityType)", html)
+        self.assertIn("zoom <= 3 ? 24", html)
+        self.assertIn("routesMaxZoom = heatmapMaxZoom + 1", html)
+        self.assertIn("bindTooltip", html)
+        self.assertIn("function kilometerPoints(activity)", html)
+        self.assertIn("markerStepKm", html)
+        self.assertIn('className: "km-marker"', html)
+        self.assertIn('window.addEventListener("activityfilterschange"', html)
+        self.assertNotIn("__ROUTE_TYPE_META__", html)
+
+    def test_stats_panel_exposes_route_filter_state(self) -> None:
+        data = StatsPanelData(
+            activities=[{"d": 20_000, "km": 1000, "s": 300, "el": 20}],
+            date_min_days=20_000,
+            date_max_days=20_000,
+            dist_max_km=1,
+        )
+
+        html = build_stats_panel_html({"all": data}, "all")
+
+        self.assertIn("window.__statsPanelSetRouteActivities__", html)
+        self.assertIn("window.__statsPanelGetFilters__", html)
+        self.assertIn('new CustomEvent("activityfilterschange"', html)
 
 
 if __name__ == "__main__":

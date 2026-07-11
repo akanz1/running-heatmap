@@ -18,6 +18,7 @@ from heatmap.activities import load_all
 from heatmap.config import Config
 from heatmap.constants import EARTH_RADIUS_KM
 from heatmap.render import build_and_save
+from heatmap.routes import save_routes
 from heatmap.sources import intervals_icu
 from heatmap.stats_panel import load_stats_panel_data
 from heatmap.stats_panel import save_stats_panel_data
@@ -378,6 +379,14 @@ def run(config: Config) -> str:
                 continue
 
         tracks_by_profile[profile] = tracks
+
+    default_profile = next(iter(profiles))
+    if default_profile in tracks_by_profile:
+        save_routes(
+            tracks_by_profile[default_profile],
+            out_dir,
+            input_fingerprint=fingerprints_by_profile[default_profile],
+        )
 
     if not tracks_by_profile and not results:
         msg = "No profile produced tracks — check filters."

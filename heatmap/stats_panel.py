@@ -182,10 +182,27 @@ _PANEL_JS = """
   function fmtMeters(m) { return Math.round(m).toLocaleString() + " m"; }
 
   var activeProfile = window.__DEFAULT_PROFILE__ || "all";
+  var externalActivities = null;
 
   function dataForProfile(profile) {
     var all = window.__STATS_BY_PROFILE__ || {};
     return all[profile] || { activities: [], date_min_days: 0, date_max_days: 1, dist_max_km: 1 };
+  }
+
+  function boundsForActivities(activities) {
+    var dateMin = Infinity, dateMax = -Infinity, distMaxM = 0;
+    activities.forEach(function(a) {
+      dateMin = Math.min(dateMin, a.d);
+      dateMax = Math.max(dateMax, a.d);
+      distMaxM = Math.max(distMaxM, a.km || 0);
+    });
+    if (!isFinite(dateMin)) { dateMin = 0; dateMax = 1; }
+    return {
+      activities: activities,
+      date_min_days: dateMin,
+      date_max_days: dateMax,
+      dist_max_km: Math.max(1, Math.ceil(distMaxM / 1000))
+    };
   }
 
   function setup() {
@@ -196,7 +213,7 @@ _PANEL_JS = """
     if (!dateLo) { setTimeout(setup, 100); return; }
 
     function refreshSliderRanges() {
-      var d = dataForProfile(activeProfile);
+      var d = externalActivities ? boundsForActivities(externalActivities) : dataForProfile(activeProfile);
       dateLo.min = d.date_min_days; dateLo.max = d.date_max_days; dateLo.value = d.date_min_days;
       dateHi.min = d.date_min_days; dateHi.max = d.date_max_days; dateHi.value = d.date_max_days;
       distLo.min = 0; distLo.max = d.dist_max_km; distLo.value = 0;
@@ -204,7 +221,7 @@ _PANEL_JS = """
     }
 
     function recompute() {
-      var data = dataForProfile(activeProfile).activities;
+      var data = externalActivities || dataForProfile(activeProfile).activities;
       // Enforce lo <= hi for both ranges.
       var dl = +dateLo.value, dh = +dateHi.value;
       if (dl > dh) { dateLo.value = dh; dl = dh; }
@@ -230,6 +247,13 @@ _PANEL_JS = """
       document.getElementById("date-hi-label").textContent = fmtDate(dh);
       document.getElementById("dist-lo-label").textContent = kl + " km";
       document.getElementById("dist-hi-label").textContent = kh + " km";
+      window.__activityFilterState__ = {
+        date_min_days: dl,
+        date_max_days: dh,
+        distance_min_m: minM,
+        distance_max_m: maxM
+      };
+      window.dispatchEvent(new CustomEvent("activityfilterschange", {detail: window.__activityFilterState__}));
     }
 
     [dateLo, dateHi, distLo, distHi].forEach(function(el) {
@@ -241,8 +265,17 @@ _PANEL_JS = """
 
     window.__statsPanelSetProfile__ = function(profile) {
       activeProfile = profile;
+      externalActivities = null;
       refreshSliderRanges();
       recompute();
+    };
+    window.__statsPanelSetRouteActivities__ = function(activities, resetRanges) {
+      externalActivities = activities;
+      if (resetRanges) refreshSliderRanges();
+      recompute();
+    };
+    window.__statsPanelGetFilters__ = function() {
+      return window.__activityFilterState__;
     };
   }
   document.addEventListener("DOMContentLoaded", setup);

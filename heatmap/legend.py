@@ -89,8 +89,8 @@ def build_legend_html(  # noqa: PLR0913
             visible=True,
         )
     }
-  {_row("legend-pace-avg", "Pace (average)", pace_css, pace_min_per_km(s_lo), pace_min_per_km(s_hi))}
-  {_row("legend-heart-rate-avg", "Heart rate (average)", hr_css, f"{hr_lo:.0f} bpm", f"{hr_hi:.0f} bpm")}
+  {_row("legend-pace-avg", "Pace", pace_css, pace_min_per_km(s_lo), pace_min_per_km(s_hi))}
+  {_row("legend-heart-rate-avg", "Heart rate", hr_css, f"{hr_lo:.0f} bpm", f"{hr_hi:.0f} bpm")}
   {
         _row(
             "legend-gradient",
@@ -100,7 +100,7 @@ def build_legend_html(  # noqa: PLR0913
             f"{g_hi * 100:.1f}% grade",
         )
     }
-  {_row("legend-elev-change", "Up vs down", _cmap_to_css(CMAP_ELEV), "descending", "ascending")}
+  {_row("legend-elev-change", "Uphill / downhill", _cmap_to_css(CMAP_ELEV), "downhill", "uphill")}
   {_row("legend-recency", "Recency (most recent visit)", recency_css, date_lo_str, date_hi_str)}
   {_row("legend-freshness-3mo", "Freshness (visits, last 3 mo; 14d boosted)", freq_css, "1", f"{recent_count_3mo_max_int} (log)")}
   {_row("legend-freshness", "Freshness (visits, last 12 mo)", freq_css, "1", f"{recent_count_max_int} (log)")}
