@@ -114,6 +114,7 @@ class ProductChangeTests(unittest.TestCase):
             payload = json.loads(path.read_text())
 
         self.assertEqual(payload["input_fingerprint"], "abc")
+        self.assertIn("generated_at", payload)
         self.assertEqual(payload["raw_point_count"], 3)
         self.assertEqual(payload["point_count"], 2)
         self.assertEqual(payload["activities"][0]["id"], "strava-1")
@@ -122,10 +123,18 @@ class ProductChangeTests(unittest.TestCase):
         self.assertEqual(payload["activities"][0]["points"], [[49.0, 8.0], [49.001, 8.001]])
 
     def test_layer_panel_includes_heatmap_and_routes_modes(self) -> None:
-        html = build_layer_panel_html(["all", "runs", "trail_runs", "hikes"], "all")
+        html = build_layer_panel_html(
+            ["all", "runs", "trail_runs", "hikes"],
+            "all",
+            heatmap_updated_at={"all": "2026-07-11T10:00:00+00:00"},
+        )
 
         self.assertIn('name="map-mode" value="heatmap"', html)
         self.assertIn('name="map-mode" value="routes" checked', html)
+        self.assertIn('<div id="view-updated-at">Updated —</div>', html)
+        self.assertIn('"all": "2026-07-11T10:00:00+00:00"', html)
+        self.assertIn("routesUpdatedAt = payload.generated_at", html)
+        self.assertIn("setInterval(updateLastUpdated, 60000)", html)
         self.assertIn('modeInput ? modeInput.value : "routes"', html)
         self.assertIn('name="route-type" value="Run" checked', html)
         self.assertIn('name="route-type" value="Trail Run" checked', html)

@@ -88,6 +88,7 @@ _PANEL_CSS = """
     box-shadow: 0 0 5px currentColor;
   }
   #layer-panel .routes-only { display: none; }
+  #view-updated-at { color: #888; font-size: 10px; margin-top: 5px; }
   #route-status { color: #888; font-size: 10px; margin-top: 5px; }
   .route-tooltip.leaflet-tooltip {
     background: rgba(15,15,15,0.94); color: #eee;
@@ -120,6 +121,7 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
         '<label><input type="radio" name="map-mode" value="heatmap"><span>Heatmap</span></label>',
         '<label><input type="radio" name="map-mode" value="routes" checked><span>Routes</span></label>',
         "</div>",
+        '<div id="view-updated-at">Updated —</div>',
         '<div class="divider"></div>',
     ]
 
@@ -188,6 +190,7 @@ _PANEL_JS_TMPL = """
   var LAYER_META = __LAYER_META__;
   var BASEMAP_META = __BASEMAP_META__;
   var ROUTE_TYPE_META = __ROUTE_TYPE_META__;
+  var HEATMAP_UPDATED_AT = __HEATMAP_UPDATED_AT__;
 
   function findMap() {
     for (var k in window) {
@@ -263,6 +266,7 @@ _PANEL_JS_TMPL = """
     var routeRecords = [];
     var routesPromise = null;
     var routeFiltersInitialized = false;
+    var routesUpdatedAt = null;
     var selectedRoute = null;
     var hoveredRoute = null;
     var heatmapMaxZoom = mapObj.getMaxZoom();
@@ -276,6 +280,26 @@ _PANEL_JS_TMPL = """
 
     var layerInput = document.querySelector('input[name="heatmap-layer"]:checked');
     var activeLayer = layerInput ? layerInput.value : "count_log";
+
+    function updateLastUpdated() {
+      var element = document.getElementById("view-updated-at");
+      if (!element) return;
+      var value = activeMode === "routes" ? routesUpdatedAt : HEATMAP_UPDATED_AT[activeProfile];
+      if (!value) {
+        element.textContent = "Updated —";
+        element.removeAttribute("title");
+        return;
+      }
+      var updated = new Date(value);
+      var ageMinutes = Math.max(0, Math.floor((Date.now() - updated.getTime()) / 60000));
+      var age;
+      if (ageMinutes < 1) age = "just now";
+      else if (ageMinutes < 60) age = ageMinutes + " min ago";
+      else if (ageMinutes < 1440) age = Math.floor(ageMinutes / 60) + " h ago";
+      else age = Math.floor(ageMinutes / 1440) + " d ago";
+      element.textContent = "Updated " + age;
+      element.title = updated.toLocaleString();
+    }
 
     function routeStyle(activityType) {
       var zoom = mapObj.getZoom();
@@ -419,6 +443,8 @@ _PANEL_JS_TMPL = """
           return response.json();
         })
         .then(function(payload) {
+          routesUpdatedAt = payload.generated_at || null;
+          updateLastUpdated();
           var loaded = 0;
           payload.activities.forEach(function(activity) {
             if (!ROUTE_TYPE_META[activity.type] || !activity.points || activity.points.length < 2) return;
@@ -540,6 +566,7 @@ _PANEL_JS_TMPL = """
       if (legend) legend.style.display = activeMode === "heatmap" ? "" : "none";
       var stats = document.getElementById("stats-panel");
       if (stats) stats.style.display = "";
+      updateLastUpdated();
     }
 
     function applyActive() {
@@ -608,6 +635,7 @@ _PANEL_JS_TMPL = """
       if (hoveredRoute) showRouteHighlight(hoveredRoute);
       else clearRouteHighlight();
     });
+    setInterval(updateLastUpdated, 60000);
 
     // Basemap radios — show one, hide the other. Layers must sit below the
     // heatmap tiles; setZIndex keeps the chosen basemap behind.
@@ -633,8 +661,13 @@ _PANEL_JS_TMPL = """
 """
 
 
-def build_layer_panel_html(profiles: list[str], default_profile: str) -> str:
+def build_layer_panel_html(
+    profiles: list[str],
+    default_profile: str,
+    heatmap_updated_at: dict[str, str] | None = None,
+) -> str:
     js = _PANEL_JS_TMPL.replace("__LAYER_META__", _layer_meta_json())
     js = js.replace("__BASEMAP_META__", _basemap_meta_json())
     js = js.replace("__ROUTE_TYPE_META__", _route_type_meta_json())
+    js = js.replace("__HEATMAP_UPDATED_AT__", json.dumps(heatmap_updated_at or {}))
     return _PANEL_CSS + _panel_html(profiles, default_profile) + js

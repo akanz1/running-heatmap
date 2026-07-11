@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+from datetime import datetime
+from datetime import timezone
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -100,6 +102,7 @@ def build_routes_payload(tracks: list[Track], input_fingerprint: str | None = No
 
     return {
         "version": ROUTES_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "input_fingerprint": input_fingerprint,
         "simplify_tolerance_m": SIMPLIFY_TOLERANCE_M,
         "raw_point_count": raw_point_count,

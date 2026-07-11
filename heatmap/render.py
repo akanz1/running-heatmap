@@ -24,6 +24,8 @@ actually reach ``L.map()``.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from datetime import timezone
 from typing import TYPE_CHECKING
 
 import folium
@@ -146,8 +148,22 @@ def build_and_save(
     _add_basemap(m)
     _add_raster_tilelayers(m, pyramid_by_profile, default_profile, config.map_opacity)
 
+    heatmap_updated_at = {}
+    for profile, pyramid in pyramid_by_profile.items():
+        metadata_path = pyramid.tiles_dir / "_pyramid.json"
+        if metadata_path.exists():
+            heatmap_updated_at[profile] = datetime.fromtimestamp(
+                metadata_path.stat().st_mtime, timezone.utc
+            ).isoformat()
+
     m.get_root().html.add_child(
-        folium.Element(build_layer_panel_html(profiles=profiles, default_profile=default_profile))
+        folium.Element(
+            build_layer_panel_html(
+                profiles=profiles,
+                default_profile=default_profile,
+                heatmap_updated_at=heatmap_updated_at,
+            )
+        )
     )
     m.get_root().html.add_child(
         folium.Element(
