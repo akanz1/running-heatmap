@@ -35,6 +35,7 @@ make setup
 | `make setup` | Create `.venv/` and install deps |
 | `make sync` | Sync new intervals.icu activities into `cache/intervals_icu/` (no-op without an API key) |
 | `make run` | Generate `outputs/heatmap.html` + tile pyramid (runs `sync` first, prompts before rebuild) |
+| `make run-routes-only` | Sync activities and refresh Routes + HTML without rebuilding heatmap tiles |
 | `make run-html-only` | Re-render HTML using the existing tile pyramid (~1 s) |
 | `make serve` | Serve `outputs/` on `http://localhost:8000` (heatmap viewer) |
 | `make admin` | Start the activity admin UI on `http://localhost:8001` |
@@ -172,6 +173,8 @@ The same activity may be in both `strava_export/` and `cache/intervals_icu/`. Ma
 ### Iterating on the HTML only
 
 `make run-html-only` reuses the tile pyramid and `_activities.json` sidecar, regenerating just `outputs/heatmap.html` in ~1 s — useful when tweaking the panel / legend / colours.
+
+`make run-routes-only` syncs and parses activities, regenerates `routes.json`, and rebuilds the HTML while reusing the existing tile pyramid. It requires one completed full build. Heatmap tiles and heatmap statistics remain unchanged until the next `make run`.
 
 ### Browser route export
 

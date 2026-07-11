@@ -283,12 +283,45 @@ def _build_profile(
     return profile, pyramid, stats_data
 
 
+def _render_cached_outputs(config: Config, profiles: dict[str, list[str]]) -> str:
+    pyramid_by_profile = {}
+    stats_by_profile = {}
+    for profile in profiles:
+        pyramid_by_profile[profile] = load_pyramid_metadata(config.output_dir() / "tiles" / profile)
+        stats_by_profile[profile] = load_stats_panel_data(config.output_dir(), profile)
+    return build_and_save(pyramid_by_profile, config, stats_by_profile=stats_by_profile)
+
+
+def _refresh_routes(config: Config, profiles: dict[str, list[str]]) -> None:
+    sync_intervals_icu(config)
+    df_all, home_lat, home_lon = load_all(config)
+    if df_all.empty:
+        raise ValueError("No activities loaded — check sources.")
+
+    forced_min_zoom = _union_min_zoom_from_df(df_all, config)
+    profile, types = next(iter(profiles.items()))
+    runs = filter_for_profile(df_all, types, config, home_lat, home_lon)
+    if runs.empty:
+        raise ValueError(f"No activities found for profile {profile!r}")
+
+    tracks = load_tracks(runs, config.track_cache_path())
+    if config.track_clip_radius_km is not None and home_lat is not None and home_lon is not None:
+        tracks = _clip_tracks(tracks, home_lat, home_lon, config.track_clip_radius_km * 1000)
+    if not tracks:
+        raise ValueError(f"No tracks found for profile {profile!r}")
+
+    fingerprint = _profile_input_fingerprint(profile, types, runs, config, forced_min_zoom)
+    save_routes(tracks, config.output_dir(), input_fingerprint=fingerprint)
+
+
 def run(config: Config) -> str:
     """Full pipeline: load → parse → tile-pyramid → render.
 
     Returns the path to the saved HTML file.
 
-    Setting ``HEATMAP_HTML_ONLY=1`` in the environment skips the activity
+    Setting ``HEATMAP_ROUTES_ONLY=1`` refreshes the route overlay and HTML
+    while reusing the existing heatmap tiles. Setting ``HEATMAP_HTML_ONLY=1``
+    skips the activity
     load, track parse, and tile-pyramid steps — instead, the existing tile
     pyramid metadata is loaded and the HTML is regenerated on top of it.
     Useful when iterating on render.py / legend.py / assets.py without
@@ -298,14 +331,14 @@ def run(config: Config) -> str:
 
     profiles = config.resolved_profiles()
 
+    if os.environ.get("HEATMAP_ROUTES_ONLY"):
+        log.info("HEATMAP_ROUTES_ONLY set — refreshing routes without rebuilding tiles")
+        _refresh_routes(config, profiles)
+        return _render_cached_outputs(config, profiles)
+
     if os.environ.get("HEATMAP_HTML_ONLY"):
         log.info("HEATMAP_HTML_ONLY set — skipping pyramid build")
-        pyramid_by_profile = {}
-        stats_by_profile = {}
-        for profile in profiles:
-            pyramid_by_profile[profile] = load_pyramid_metadata(config.output_dir() / "tiles" / profile)
-            stats_by_profile[profile] = load_stats_panel_data(config.output_dir(), profile)
-        return build_and_save(pyramid_by_profile, config, stats_by_profile=stats_by_profile)
+        return _render_cached_outputs(config, profiles)
 
     sync_result = sync_intervals_icu(config)
     df_all, home_lat, home_lon = load_all(config)

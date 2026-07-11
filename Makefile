@@ -1,7 +1,7 @@
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
 
-.PHONY: setup update sync run run-html-only serve admin lint format clean
+.PHONY: setup update sync run run-routes-only run-html-only serve admin lint format clean
 
 ## Create venv and install all dependencies
 setup:
@@ -19,6 +19,10 @@ sync:
 ## Generate the heatmap HTML + tile pyramid
 run:
 	uv run python main.py
+
+## Sync activities and refresh Routes + HTML using existing heatmap tiles.
+run-routes-only:
+	HEATMAP_ROUTES_ONLY=1 uv run python main.py
 
 ## Re-render outputs/heatmap.html using the existing tile pyramid (~1 s).
 ## Use this when iterating on render.py / legend.py / assets.py without

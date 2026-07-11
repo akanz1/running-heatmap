@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from heatmap import run
 from heatmap.layer_panel import LAYERS
 from heatmap.layer_panel import build_layer_panel_html
 from heatmap.routes import save_routes
@@ -21,6 +22,22 @@ from main import config
 
 
 class ProductChangeTests(unittest.TestCase):
+    def test_routes_only_refresh_skips_tile_builder(self) -> None:
+        test_config = Config(activity_type_profiles={"all": []})
+
+        with (
+            patch.dict("os.environ", {"HEATMAP_ROUTES_ONLY": "1"}, clear=True),
+            patch("heatmap._refresh_routes") as refresh_routes,
+            patch("heatmap._render_cached_outputs", return_value="outputs/heatmap.html") as render,
+            patch("heatmap.build_pyramid") as tile_builder,
+        ):
+            result = run(test_config)
+
+        refresh_routes.assert_called_once_with(test_config, test_config.resolved_profiles())
+        render.assert_called_once_with(test_config, test_config.resolved_profiles())
+        tile_builder.assert_not_called()
+        self.assertEqual(result, "outputs/heatmap.html")
+
     def test_all_is_default_activity_profile(self) -> None:
         self.assertEqual(next(iter(config.resolved_profiles())), "all")
 
