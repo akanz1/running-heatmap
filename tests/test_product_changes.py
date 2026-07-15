@@ -11,6 +11,7 @@ import pandas as pd
 from heatmap import run
 from heatmap.layer_panel import LAYERS
 from heatmap.layer_panel import build_layer_panel_html
+from heatmap.parsers import _elapsed_seconds
 from heatmap.routes import save_routes
 from heatmap.stats_panel import StatsPanelData
 from heatmap.stats_panel import build_stats_panel_html
@@ -103,9 +104,9 @@ class ProductChangeTests(unittest.TestCase):
             moving_time_s=300,
             elevation_gain_m=20,
             points=[
-                [49.0, 8.0, 3.0, 140, 100.0],
-                [49.0005, 8.0005, 3.0, 140, 102.0],
-                [49.001, 8.001, 3.0, 140, 105.0],
+                [49.0, 8.0, 3.0, 140, 100.0, 0.0],
+                [49.0005, 8.0005, 3.0, 140, 102.0, 10.0],
+                [49.001, 8.001, 3.0, 140, 105.0, 20.0],
             ],
         )
 
@@ -121,6 +122,19 @@ class ProductChangeTests(unittest.TestCase):
         self.assertEqual(payload["activities"][0]["type"], "Run")
         self.assertIsNone(payload["activities"][0]["distance_m"])
         self.assertEqual(payload["activities"][0]["points"], [[49.0, 8.0], [49.001, 8.001]])
+        self.assertEqual(payload["activities"][0]["elapsed_s"], [0.0, 20.0])
+        self.assertEqual(len(payload["activities"][0]["progress_m"]), 2)
+        self.assertEqual(payload["activities"][0]["progress_m"][0], 0.0)
+        self.assertGreater(payload["activities"][0]["progress_m"][1], 100)
+
+    def test_elapsed_seconds_are_relative_and_keep_missing_samples(self) -> None:
+        times = [
+            pd.Timestamp("2026-06-17T07:00:00Z").to_pydatetime(),
+            None,
+            pd.Timestamp("2026-06-17T07:00:12.500Z").to_pydatetime(),
+        ]
+
+        self.assertEqual(_elapsed_seconds(times), [0.0, None, 12.5])
 
     def test_layer_panel_includes_heatmap_and_routes_modes(self) -> None:
         html = build_layer_panel_html(
@@ -155,6 +169,25 @@ class ProductChangeTests(unittest.TestCase):
         self.assertIn("markerStepKm", html)
         self.assertIn('className: "km-marker"', html)
         self.assertIn('window.addEventListener("activityfilterschange"', html)
+        self.assertIn('id="segment-draw"', html)
+        self.assertIn('id="segment-results"', html)
+        self.assertIn("function intersectionFraction", html)
+        self.assertIn("function segmentEffort", html)
+        self.assertIn("localStorage.setItem", html)
+        self.assertIn('data-sort="time"', html)
+        self.assertIn('data-sort="distance"', html)
+        self.assertIn('id="segment-chart"', html)
+        self.assertIn("function renderSegmentChart", html)
+        self.assertIn("progress_m", html)
+        self.assertIn("function focusRoute", html)
+        self.assertIn("getBoundsZoom", html)
+        self.assertIn("fitZoom - 1", html)
+        self.assertIn("autoPan: false", html)
+        self.assertIn('id="segment-chart-tooltip"', html)
+        self.assertIn("function setEffortHover", html)
+        self.assertIn("function setEffortSelected", html)
+        self.assertIn("function showSegmentTooltip", html)
+        self.assertIn("is-selected", html)
         self.assertNotIn("__ROUTE_TYPE_META__", html)
 
     def test_stats_panel_exposes_route_filter_state(self) -> None:

@@ -21,15 +21,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ROUTES_FILENAME = "routes.json"
-ROUTES_VERSION = 1
+ROUTES_VERSION = 3
 SIMPLIFY_TOLERANCE_M = 5.0
 
 
-def simplify_route(points: list[list], tolerance_m: float = SIMPLIFY_TOLERANCE_M) -> list[list[float]]:
-    """Simplify lat/lon geometry with iterative Ramer-Douglas-Peucker."""
+def simplify_route_indices(points: list[list], tolerance_m: float = SIMPLIFY_TOLERANCE_M) -> list[int]:
+    """Return point indices kept by iterative Ramer-Douglas-Peucker."""
     coords = np.asarray([[p[0], p[1]] for p in points], dtype=np.float64)
     if len(coords) <= 2:  # noqa: PLR2004
-        return [[round(float(lat), 6), round(float(lon), 6)] for lat, lon in coords]
+        return list(range(len(coords)))
 
     mean_lat_rad = math.radians(float(coords[:, 0].mean()))
     earth_radius_m = EARTH_RADIUS_KM * 1000
@@ -69,7 +69,25 @@ def simplify_route(points: list[list], tolerance_m: float = SIMPLIFY_TOLERANCE_M
         stack.append((start, index))
         stack.append((index, end))
 
-    return [[round(float(lat), 6), round(float(lon), 6)] for lat, lon in coords[keep]]
+    return np.flatnonzero(keep).tolist()
+
+
+def simplify_route(points: list[list], tolerance_m: float = SIMPLIFY_TOLERANCE_M) -> list[list[float]]:
+    """Simplify lat/lon geometry with iterative Ramer-Douglas-Peucker."""
+    indices = simplify_route_indices(points, tolerance_m)
+    return [[round(float(points[i][0]), 6), round(float(points[i][1]), 6)] for i in indices]
+
+
+def cumulative_route_distances(points: list[list]) -> list[float]:
+    """Return cumulative GPS path distance in meters for every point."""
+    if not points:
+        return []
+    coords = np.radians(np.asarray([[p[0], p[1]] for p in points], dtype=np.float64))
+    dlat = np.diff(coords[:, 0])
+    dlon = np.diff(coords[:, 1])
+    a = np.sin(dlat / 2) ** 2 + np.cos(coords[:-1, 0]) * np.cos(coords[1:, 0]) * np.sin(dlon / 2) ** 2
+    distances = EARTH_RADIUS_KM * 2000 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+    return np.concatenate(([0.0], np.cumsum(distances))).tolist()
 
 
 def _finite_number(value: float | None) -> float | None:
@@ -84,7 +102,14 @@ def build_routes_payload(tracks: list[Track], input_fingerprint: str | None = No
     raw_point_count = 0
     simplified_point_count = 0
     for track in tracks:
-        points = simplify_route(track.points)
+        indices = simplify_route_indices(track.points)
+        cumulative_distances = cumulative_route_distances(track.points)
+        points = [
+            [round(float(track.points[i][0]), 6), round(float(track.points[i][1]), 6)]
+            for i in indices
+        ]
+        elapsed_s = [_finite_number(track.points[i][5]) if len(track.points[i]) > 5 else None for i in indices]
+        progress_m = [round(cumulative_distances[i], 1) for i in indices]
         raw_point_count += len(track.points)
         simplified_point_count += len(points)
         activities.append(
@@ -97,6 +122,8 @@ def build_routes_payload(tracks: list[Track], input_fingerprint: str | None = No
                 "moving_time_s": _finite_number(track.moving_time_s),
                 "elevation_gain_m": _finite_number(track.elevation_gain_m),
                 "points": points,
+                "elapsed_s": elapsed_s,
+                "progress_m": progress_m,
             }
         )
 

@@ -57,6 +57,8 @@ Basemap, heatmap layer, and stats panel are all in the viewer — no rebuild nee
 
 The **View** toggle switches between the pre-rendered Heatmap and individual Routes. Routes load lazily from `routes.json`, use cyan / green / orange for runs / trail runs / hikes, and expose per-type checkboxes. Stroke width and opacity adapt to zoom; world/continent views add a broad low-opacity presence glow so sub-pixel routes remain visible and overlapping activity locations intensify. Date and distance filters update drawn routes + totals live. Hover adds a high-contrast route halo; click locks its details. Highlighted routes show 1 km markers at street/city zoom and 5 km markers at wider regional zoom. Routes is the default view and allows one extra vector-only zoom level; Heatmap remains capped at its highest rendered tile zoom.
 
+Routes view also supports custom segments. Click **Draw segment**, then place two points for the start gate and two for the finish gate. Activities crossing start then finish are listed in a sortable effort table; reverse-direction activities are excluded. Aligned charts show attempt time, five-attempt median, PB, and GPS path distance by date so timing and distance outliers stand out. Segment gates persist in browser local storage. Times use recorded track timestamps when available and show `~` when estimated from moving time.
+
 ### Optional: intervals.icu sync
 
 Two roles:
@@ -178,7 +180,7 @@ The same activity may be in both `strava_export/` and `cache/intervals_icu/`. Ma
 
 ### Browser route export
 
-Each full build writes `outputs/routes.json`: activity metadata plus GPS geometry simplified to a 5 m tolerance. This keeps individual routes available for browser-side filtering and interaction without shipping the full parse cache.
+Each full build writes `outputs/routes.json`: activity metadata, elapsed timestamps, cumulative GPS distance, and geometry simplified to a 5 m tolerance. This keeps individual routes available for browser-side filtering, segments, and interaction without shipping the full parse cache.
 
 ### Track formats
 

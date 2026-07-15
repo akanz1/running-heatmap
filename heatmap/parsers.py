@@ -7,7 +7,7 @@ device recorded it:
 - `.gpx.gz` / `.gpx` — XML, used by older Strava activities and many manual uploads
 - `.tcx.gz` — XML, Garmin's older Training Center format
 
-Each parser returns a list of [lat, lon, speed_ms, hr_bpm, alt_m] points where
+Each parser returns [lat, lon, speed_ms, hr_bpm, alt_m, elapsed_s] points where
 fields the format doesn't provide are `None`. For GPX/TCX (no native speed
 field) speed is derived from timestamps + position deltas.
 """
@@ -31,7 +31,7 @@ from heatmap.constants import SEMICIRCLE_TO_DEG
 log = logging.getLogger(__name__)
 
 
-TrackPoint = list  # [lat, lon, speed_ms, hr_bpm, alt_m]
+TrackPoint = list  # [lat, lon, speed_ms, hr_bpm, alt_m, elapsed_s]
 
 # Above this, treat as a GPS glitch (timestamps in GPX/TCX are 1s-resolution
 # so a 30m jump = 30 m/s false reading).
@@ -98,6 +98,14 @@ def _derive_speeds(
     return speeds
 
 
+def _elapsed_seconds(times: list[datetime | None]) -> list[float | None]:
+    """Convert timestamps to seconds since first available sample."""
+    start = next((value for value in times if value is not None), None)
+    if start is None:
+        return [None] * len(times)
+    return [None if value is None else (value - start).total_seconds() for value in times]
+
+
 # --------------------------------------------------------------------------- #
 # FIT
 # --------------------------------------------------------------------------- #
@@ -105,6 +113,7 @@ def _derive_speeds(
 
 def _parse_fit(filepath: Path) -> list[TrackPoint]:
     points: list[TrackPoint] = []
+    times: list[datetime | None] = []
     with _open_maybe_gz(filepath) as f:
         for msg in fitparse.FitFile(f).get_messages("record"):
             d = {x.name: x.value for x in msg}
@@ -116,6 +125,9 @@ def _parse_fit(filepath: Path) -> list[TrackPoint]:
             hr = d.get("heart_rate")
             alt = d.get("enhanced_altitude") if d.get("enhanced_altitude") is not None else d.get("altitude")
             points.append([lat, lon, speed, hr, alt])
+            times.append(d.get("timestamp"))
+    for point, elapsed_s in zip(points, _elapsed_seconds(times), strict=True):
+        point.append(elapsed_s)
     return points
 
 
@@ -139,8 +151,9 @@ def _parse_gpx(filepath: Path) -> list[TrackPoint]:
                 extras.append((_gpx_hr(pt), pt.elevation))
 
     speeds = _derive_speeds(coords, times)
+    elapsed = _elapsed_seconds(times)
     return [
-        [coords[i][0], coords[i][1], speeds[i], extras[i][0], extras[i][1]]
+        [coords[i][0], coords[i][1], speeds[i], extras[i][0], extras[i][1], elapsed[i]]
         for i in range(len(coords))
     ]
 
@@ -214,8 +227,9 @@ def _parse_tcx(filepath: Path) -> list[TrackPoint]:
         extras.append((hr, alt))
 
     speeds = _derive_speeds(coords, times)
+    elapsed = _elapsed_seconds(times)
     return [
-        [coords[i][0], coords[i][1], speeds[i], extras[i][0], extras[i][1]]
+        [coords[i][0], coords[i][1], speeds[i], extras[i][0], extras[i][1], elapsed[i]]
         for i in range(len(coords))
     ]
 

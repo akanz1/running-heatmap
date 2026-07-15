@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Track points use 5 fields: [lat, lon, speed_ms, hr_bpm, alt_m]
-TRACK_POINT_FIELDS = 5
+# Track points use 6 fields: [lat, lon, speed_ms, hr_bpm, alt_m, elapsed_s]
+TRACK_POINT_FIELDS = 6
 
 # Extensions that used to be cached without speed (pre-derived-speed upgrade).
 # These get cleared so they re-parse with timestamps → speed.
@@ -67,7 +67,7 @@ def _load_cache(cache_path: Path) -> dict:
 
     stale_fields = [k for k, v in cache.items() if v and len(v[0]) < TRACK_POINT_FIELDS]
     if stale_fields:
-        log.info("Clearing %d stale cache entries (missing altitude field)", len(stale_fields))
+        log.info("Clearing %d stale cache entries (missing elapsed time field)", len(stale_fields))
         for k in stale_fields:
             del cache[k]
 
