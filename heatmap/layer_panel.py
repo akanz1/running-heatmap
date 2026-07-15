@@ -922,8 +922,15 @@ _PANEL_JS_TMPL = """
     function selectRoute(record) {
       selectedRoute = record;
       setEffortSelected(record);
-      showRouteHighlight(record);
+      updateRouteStyles();
       focusRoute(record);
+    }
+
+    function clearRouteSelection() {
+      if (!selectedRoute) return;
+      selectedRoute = null;
+      setEffortSelected(null);
+      updateRouteStyles();
     }
 
     function escapeHtml(value) {
@@ -1079,11 +1086,10 @@ _PANEL_JS_TMPL = """
       setRouteStatus(visible + " of " + routeRecords.length + " activities visible");
       if (hoveredRoute && !routeGroup.hasLayer(hoveredRoute.layer)) hoveredRoute = null;
       if (selectedRoute && !routeGroup.hasLayer(selectedRoute.layer)) {
-        selectedRoute = null;
-        setEffortSelected(null);
+        clearRouteSelection();
         mapObj.closePopup();
       }
-      else if (hoveredRoute || selectedRoute) showRouteHighlight(hoveredRoute || selectedRoute);
+      else updateRouteStyles();
       renderSegment();
       updateSegmentResults();
     }
@@ -1094,8 +1100,14 @@ _PANEL_JS_TMPL = """
 
     function updateRouteStyles() {
       routeRecords.forEach(function(record) {
-        record.glowLayer.setStyle(routeGlowStyle(record.activity.type));
-        record.layer.setStyle(routeStyle(record.activity.type));
+        var glowStyle = routeGlowStyle(record.activity.type);
+        var style = routeStyle(record.activity.type);
+        if (selectedRoute && record !== selectedRoute) {
+          glowStyle.opacity *= 0.2;
+          style.opacity *= 0.2;
+        }
+        record.glowLayer.setStyle(glowStyle);
+        record.layer.setStyle(style);
       });
       if (hoveredRoute || selectedRoute) showRouteHighlight(hoveredRoute || selectedRoute);
     }
@@ -1188,6 +1200,10 @@ _PANEL_JS_TMPL = """
     });
     mapObj.on("click", function(event) {
       if (segmentDrawing) addSegmentPoint(event.latlng);
+      else {
+        mapObj.closePopup();
+        clearRouteSelection();
+      }
     });
     document.addEventListener("keydown", function(event) {
       if (event.key === "Escape" && segmentDrawing) cancelSegmentDrawing();
@@ -1199,11 +1215,7 @@ _PANEL_JS_TMPL = """
       if (activeMode === "routes") updateRouteStyles();
     });
     mapObj.on("popupclose", function() {
-      if (!selectedRoute) return;
-      selectedRoute = null;
-      setEffortSelected(null);
-      if (hoveredRoute) showRouteHighlight(hoveredRoute);
-      else clearRouteHighlight();
+      clearRouteSelection();
     });
     setInterval(updateLastUpdated, 60000);
 

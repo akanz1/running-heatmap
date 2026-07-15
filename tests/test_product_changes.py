@@ -188,6 +188,9 @@ class ProductChangeTests(unittest.TestCase):
         self.assertIn("function setEffortSelected", html)
         self.assertIn("function showSegmentTooltip", html)
         self.assertIn("is-selected", html)
+        self.assertIn("function clearRouteSelection", html)
+        self.assertIn("selectedRoute && record !== selectedRoute", html)
+        self.assertIn("style.opacity *= 0.2", html)
         self.assertNotIn("__ROUTE_TYPE_META__", html)
 
     def test_stats_panel_exposes_route_filter_state(self) -> None:
