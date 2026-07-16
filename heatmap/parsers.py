@@ -7,9 +7,10 @@ device recorded it:
 - `.gpx.gz` / `.gpx` — XML, used by older Strava activities and many manual uploads
 - `.tcx.gz` — XML, Garmin's older Training Center format
 
-Each parser returns [lat, lon, speed_ms, hr_bpm, alt_m, elapsed_s] points where
-fields the format doesn't provide are `None`. For GPX/TCX (no native speed
-field) speed is derived from timestamps + position deltas.
+Each parser returns
+[lat, lon, speed_ms, hr_bpm, alt_m, elapsed_s, cadence_spm, power_w, temperature_c]
+points where fields the format doesn't provide are `None`. For GPX/TCX (no
+native speed field) speed is derived from timestamps + position deltas.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from heatmap.constants import SEMICIRCLE_TO_DEG
 log = logging.getLogger(__name__)
 
 
-TrackPoint = list  # [lat, lon, speed_ms, hr_bpm, alt_m, elapsed_s]
+TrackPoint = list
 
 # Above this, treat as a GPS glitch (timestamps in GPX/TCX are 1s-resolution
 # so a 30m jump = 30 m/s false reading).
@@ -106,6 +107,43 @@ def _elapsed_seconds(times: list[datetime | None]) -> list[float | None]:
     return [None if value is None else (value - start).total_seconds() for value in times]
 
 
+def _number(value) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cadence_spm(cadence, fractional=0) -> float | None:
+    cadence_value = _number(cadence)
+    if cadence_value is None:
+        return None
+    return 2 * (cadence_value + (_number(fractional) or 0))
+
+
+def _extension_metrics(elements) -> tuple[float | None, float | None, float | None, float | None]:
+    values = {"heart_rate": None, "cadence": None, "power": None, "temperature": None}
+    tags = {
+        "hr": "heart_rate",
+        "heartrate": "heart_rate",
+        "heartratebpm": "heart_rate",
+        "cad": "cadence",
+        "cadence": "cadence",
+        "runcadence": "cadence",
+        "power": "power",
+        "watts": "power",
+        "atemp": "temperature",
+        "temperature": "temperature",
+        "temp": "temperature",
+    }
+    for element in elements:
+        for child in element.iter():
+            metric = tags.get(child.tag.rsplit("}", 1)[-1].lower())
+            if metric and child.text and values[metric] is None:
+                values[metric] = _number(child.text)
+    return values["heart_rate"], _cadence_spm(values["cadence"]), values["power"], values["temperature"]
+
+
 # --------------------------------------------------------------------------- #
 # FIT
 # --------------------------------------------------------------------------- #
@@ -124,10 +162,11 @@ def _parse_fit(filepath: Path) -> list[TrackPoint]:
             speed = d.get("enhanced_speed") if d.get("enhanced_speed") is not None else d.get("speed")
             hr = d.get("heart_rate")
             alt = d.get("enhanced_altitude") if d.get("enhanced_altitude") is not None else d.get("altitude")
-            points.append([lat, lon, speed, hr, alt])
+            cadence = _cadence_spm(d.get("cadence"), d.get("fractional_cadence"))
+            points.append([lat, lon, speed, hr, alt, None, cadence, d.get("power"), d.get("temperature")])
             times.append(d.get("timestamp"))
     for point, elapsed_s in zip(points, _elapsed_seconds(times), strict=True):
-        point.append(elapsed_s)
+        point[5] = elapsed_s
     return points
 
 
@@ -142,33 +181,21 @@ def _parse_gpx(filepath: Path) -> list[TrackPoint]:
 
     coords: list[tuple[float, float]] = []
     times: list[datetime | None] = []
-    extras: list[tuple[float | None, float | None]] = []  # (hr, alt)
+    extras = []
     for track in gpx.tracks:
         for seg in track.segments:
             for pt in seg.points:
                 coords.append((pt.latitude, pt.longitude))
                 times.append(pt.time)
-                extras.append((_gpx_hr(pt), pt.elevation))
+                hr, cadence, power, temperature = _extension_metrics(pt.extensions or [])
+                extras.append((hr, pt.elevation, cadence, power, temperature))
 
     speeds = _derive_speeds(coords, times)
     elapsed = _elapsed_seconds(times)
     return [
-        [coords[i][0], coords[i][1], speeds[i], extras[i][0], extras[i][1], elapsed[i]]
+        [coords[i][0], coords[i][1], speeds[i], *extras[i][:2], elapsed[i], *extras[i][2:]]
         for i in range(len(coords))
     ]
-
-
-def _gpx_hr(pt) -> float | None:
-    """Pull heart rate out of Garmin TrackPointExtension if present."""
-    for ext in pt.extensions or []:
-        for child in ext.iter():
-            tag = child.tag.rsplit("}", 1)[-1]
-            if tag == "hr" and child.text:
-                try:
-                    return float(child.text)
-                except ValueError:
-                    return None
-    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -198,11 +225,11 @@ def _parse_tcx(filepath: Path) -> list[TrackPoint]:
 
     coords: list[tuple[float, float]] = []
     times: list[datetime | None] = []
-    extras: list[tuple[float | None, float | None]] = []  # (hr, alt)
+    extras = []
     for trkpt in tree.iter():
         if _local(trkpt.tag) != "Trackpoint":
             continue
-        lat = lon = alt = hr = None
+        lat = lon = alt = hr = cadence = power = temperature = None
         t: datetime | None = None
         for child in trkpt:
             tag = _local(child.tag)
@@ -220,16 +247,24 @@ def _parse_tcx(filepath: Path) -> list[TrackPoint]:
                 for sub in child:
                     if _local(sub.tag) == "Value" and sub.text:
                         hr = float(sub.text)
+            elif tag == "Cadence" and child.text:
+                cadence = _cadence_spm(child.text)
+            elif tag == "Extensions":
+                extension_hr, extension_cadence, power, temperature = _extension_metrics([child])
+                if hr is None:
+                    hr = extension_hr
+                if cadence is None:
+                    cadence = extension_cadence
         if lat is None or lon is None:
             continue
         coords.append((lat, lon))
         times.append(t)
-        extras.append((hr, alt))
+        extras.append((hr, alt, cadence, power, temperature))
 
     speeds = _derive_speeds(coords, times)
     elapsed = _elapsed_seconds(times)
     return [
-        [coords[i][0], coords[i][1], speeds[i], extras[i][0], extras[i][1], elapsed[i]]
+        [coords[i][0], coords[i][1], speeds[i], *extras[i][:2], elapsed[i], *extras[i][2:]]
         for i in range(len(coords))
     ]
 

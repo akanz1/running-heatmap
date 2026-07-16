@@ -103,17 +103,27 @@ _PANEL_CSS = """
   #segment-results[hidden] { display: none !important; }
   #segment-results {
     position: fixed; right: 10px; bottom: 28px; z-index: 9998;
-    width: min(680px, calc(100vw - 290px)); max-height: 58vh; overflow: auto;
+    width: min(980px, calc(100vw - 290px)); max-height: 58vh; overflow: auto;
     background: rgba(15,15,15,0.92); color: #ddd; border-radius: 9px;
     border: 1px solid rgba(255,255,255,0.10); box-shadow: 0 2px 8px rgba(0,0,0,0.6);
     font: 12px/1.4 sans-serif;
   }
   #segment-results .segment-results-head {
-    display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 1;
+    display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 2;
     padding: 9px 11px 7px; background: rgba(15,15,15,0.98);
     border-bottom: 1px solid rgba(255,255,255,0.08);
   }
+  #segment-results .segment-results-actions { display: flex; align-items: center; gap: 10px; }
   #segment-results .segment-results-count { color: #888; }
+  #segment-results .segment-column-picker { position: relative; }
+  #segment-results .segment-column-picker summary { color: #ddd; cursor: pointer; font-weight: 600; }
+  #segment-results .segment-column-options {
+    position: absolute; top: calc(100% + 7px); right: 0; z-index: 3;
+    display: grid; grid-template-columns: repeat(2, max-content); gap: 5px 14px;
+    padding: 9px 11px; border-radius: 7px; background: rgba(15,15,15,0.98);
+    border: 1px solid rgba(255,255,255,0.14); box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+  }
+  #segment-results .segment-column-options label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
   #segment-chart { display: block; width: 100%; height: auto; border-bottom: 1px solid rgba(255,255,255,0.08); }
   #segment-chart text { fill: #aaa; font: 10px sans-serif; }
   #segment-chart .chart-title { fill: #ddd; font-weight: 700; }
@@ -133,7 +143,7 @@ _PANEL_CSS = """
     box-shadow: 0 2px 8px rgba(0,0,0,0.55); white-space: nowrap;
   }
   #segment-chart-tooltip .tooltip-meta { color: #aaa; margin-top: 2px; }
-  #segment-results table { width: 100%; border-collapse: collapse; }
+  #segment-results table { width: max-content; min-width: 100%; border-collapse: collapse; }
   #segment-results th, #segment-results td {
     padding: 6px 9px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06);
   }
@@ -148,7 +158,7 @@ _PANEL_CSS = """
   #segment-results tbody tr.is-selected {
     background: rgba(251,191,36,0.12); box-shadow: inset 3px 0 #fbbf24;
   }
-  #segment-results td:first-child, #segment-results td:last-child { white-space: nowrap; }
+  #segment-results td:first-child, #segment-results td:nth-child(n+4) { white-space: nowrap; }
   .segment-gate-label.leaflet-tooltip {
     padding: 2px 5px; border: 0; border-radius: 4px; background: rgba(15,15,15,0.9);
     color: #fff; box-shadow: none; font: 700 9px/1 sans-serif;
@@ -185,8 +195,8 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
     rows = [
         '<div class="group-title">View</div>',
         '<div class="mode-toggle">',
-        '<label><input type="radio" name="map-mode" value="heatmap"><span>Heatmap</span></label>',
         '<label><input type="radio" name="map-mode" value="routes" checked><span>Routes</span></label>',
+        '<label><input type="radio" name="map-mode" value="heatmap"><span>Heatmap</span></label>',
         "</div>",
         '<div id="view-updated-at">Updated —</div>',
         '<div class="divider"></div>',
@@ -241,7 +251,21 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
     rows.append("</div>")
     results = """
 <div id="segment-results" class="routes-only" hidden>
-  <div class="segment-results-head"><strong>Segment efforts</strong><span class="segment-results-count"></span></div>
+  <div class="segment-results-head"><strong>Segment efforts</strong><div class="segment-results-actions">
+    <span class="segment-results-count"></span><details class="segment-column-picker"><summary>Columns</summary>
+    <div class="segment-column-options">
+      <label><input type="checkbox" data-segment-column-toggle="time" checked>Time</label>
+      <label><input type="checkbox" data-segment-column-toggle="pace" checked>Pace</label>
+      <label><input type="checkbox" data-segment-column-toggle="distance" checked>Distance</label>
+      <label><input type="checkbox" data-segment-column-toggle="heart_rate" checked>Avg HR</label>
+      <label><input type="checkbox" data-segment-column-toggle="elevation_gain" checked>D+</label>
+      <label><input type="checkbox" data-segment-column-toggle="elevation_loss" checked>D−</label>
+      <label><input type="checkbox" data-segment-column-toggle="grade" checked>Grade</label>
+      <label><input type="checkbox" data-segment-column-toggle="cadence" checked>Cadence</label>
+      <label><input type="checkbox" data-segment-column-toggle="power" checked>Power</label>
+      <label><input type="checkbox" data-segment-column-toggle="temperature" checked>Temperature</label>
+    </div></details>
+  </div></div>
   <svg id="segment-chart" viewBox="0 0 680 245" role="img" aria-label="Segment time and distance by attempt date"></svg>
   <div id="segment-chart-tooltip" role="tooltip" hidden></div>
   <table>
@@ -249,8 +273,16 @@ def _panel_html(profiles: list[str], default_profile: str) -> str:
       <th><button type="button" data-sort="date">Date</button></th>
       <th><button type="button" data-sort="activity">Activity</button></th>
       <th><button type="button" data-sort="type">Type</button></th>
-      <th><button type="button" data-sort="time">Time</button></th>
-      <th><button type="button" data-sort="distance">Distance</button></th>
+      <th data-segment-column="time"><button type="button" data-sort="time">Time</button></th>
+      <th data-segment-column="pace"><button type="button" data-sort="pace">Pace</button></th>
+      <th data-segment-column="distance"><button type="button" data-sort="distance">Distance</button></th>
+      <th data-segment-column="heart_rate"><button type="button" data-sort="heart_rate">Avg HR</button></th>
+      <th data-segment-column="elevation_gain"><button type="button" data-sort="elevation_gain">D+</button></th>
+      <th data-segment-column="elevation_loss"><button type="button" data-sort="elevation_loss">D−</button></th>
+      <th data-segment-column="grade"><button type="button" data-sort="grade">Grade</button></th>
+      <th data-segment-column="cadence"><button type="button" data-sort="cadence">Cadence</button></th>
+      <th data-segment-column="power"><button type="button" data-sort="power">Power</button></th>
+      <th data-segment-column="temperature"><button type="button" data-sort="temperature">Temp</button></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -368,6 +400,9 @@ _PANEL_JS_TMPL = """
     var segmentDraft = [];
     var segmentDrawing = false;
     var segmentSort = {key: "time", direction: 1};
+    var segmentColumnKeys = ["time", "pace", "distance", "heart_rate", "elevation_gain", "elevation_loss",
+                             "grade", "cadence", "power", "temperature"];
+    var segmentColumns = loadSegmentColumns();
     var heatmapMaxZoom = mapObj.getMaxZoom();
     var routesMaxZoom = heatmapMaxZoom + 1;
 
@@ -449,6 +484,27 @@ _PANEL_JS_TMPL = """
 
     function saveSegment() {
       try { localStorage.setItem("running-heatmap-segment", JSON.stringify(segment)); } catch (error) {}
+    }
+
+    function loadSegmentColumns() {
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem("running-heatmap-segment-columns")); } catch (error) {}
+      var columns = {};
+      segmentColumnKeys.forEach(function(key) { columns[key] = !saved || saved[key] !== false; });
+      return columns;
+    }
+
+    function applySegmentColumns() {
+      document.querySelectorAll("[data-segment-column-toggle]").forEach(function(input) {
+        input.checked = segmentColumns[input.dataset.segmentColumnToggle];
+      });
+      document.querySelectorAll("[data-segment-column]").forEach(function(element) {
+        element.hidden = !segmentColumns[element.dataset.segmentColumn];
+      });
+    }
+
+    function saveSegmentColumns() {
+      try { localStorage.setItem("running-heatmap-segment-columns", JSON.stringify(segmentColumns)); } catch (error) {}
     }
 
     function setSegmentStatus(message) {
@@ -606,7 +662,21 @@ _PANEL_JS_TMPL = """
       if (!segment) return null;
       var elapsed = activityElapsed(activity);
       var pathDistances = activityProgress(activity);
+      var averageMetrics = [
+        {output: "average_hr_bpm", values: activity.heart_rate_bpm_seconds, durations: activity.heart_rate_duration_s},
+        {output: "average_cadence_spm", values: activity.cadence_spm_seconds, durations: activity.cadence_duration_s},
+        {output: "average_power_w", values: activity.power_watt_seconds, durations: activity.power_duration_s},
+        {output: "average_temperature_c", values: activity.temperature_c_seconds, durations: activity.temperature_duration_s}
+      ].filter(function(metric) {
+        return metric.values && metric.durations && metric.values.length === activity.points.length &&
+          metric.durations.length === activity.points.length;
+      });
+      var hasElevation = activity.elevation_m && activity.elevation_gain_progress_m &&
+        activity.elevation_loss_progress_m && activity.elevation_m.length === activity.points.length &&
+        activity.elevation_gain_progress_m.length === activity.points.length &&
+        activity.elevation_loss_progress_m.length === activity.points.length;
       var started = false, startElapsed = null, startDistance = null, startProgress = null;
+      var startElevation = null, startElevationGain = null, startElevationLoss = null;
       for (var i = 1; i < activity.points.length; i++) {
         var events = [];
         var startFraction = intersectionFraction(activity.points[i - 1], activity.points[i], segment.start[0], segment.start[1]);
@@ -622,15 +692,42 @@ _PANEL_JS_TMPL = """
             startProgress = progress;
             startElapsed = interpolatedElapsed(elapsed, i, event.fraction);
             startDistance = interpolatedElapsed(pathDistances, i, event.fraction);
+            averageMetrics.forEach(function(metric) {
+              metric.startValue = interpolatedElapsed(metric.values, i, event.fraction);
+              metric.startDuration = interpolatedElapsed(metric.durations, i, event.fraction);
+            });
+            if (hasElevation) {
+              startElevation = interpolatedElapsed(activity.elevation_m, i, event.fraction);
+              startElevationGain = interpolatedElapsed(activity.elevation_gain_progress_m, i, event.fraction);
+              startElevationLoss = interpolatedElapsed(activity.elevation_loss_progress_m, i, event.fraction);
+            }
           } else if (started && event.kind === "finish" && progress > startProgress + 1e-9) {
             var finishElapsed = interpolatedElapsed(elapsed, i, event.fraction);
             var finishDistance = interpolatedElapsed(pathDistances, i, event.fraction);
-            return {
+            var effort = {
               seconds: startElapsed == null || finishElapsed == null ? null : finishElapsed - startElapsed,
               approximate: activity.__segmentTimeApproximate,
               distance_m: startDistance == null || finishDistance == null ? null : finishDistance - startDistance,
               distance_approximate: activity.__segmentDistanceApproximate
             };
+            averageMetrics.forEach(function(metric) {
+              var finishValue = interpolatedElapsed(metric.values, i, event.fraction);
+              var finishDuration = interpolatedElapsed(metric.durations, i, event.fraction);
+              var measuredSeconds = finishDuration - metric.startDuration;
+              effort[metric.output] = Number.isFinite(measuredSeconds) && measuredSeconds > 0
+                ? (finishValue - metric.startValue) / measuredSeconds : null;
+            });
+            if (hasElevation) {
+              var finishElevation = interpolatedElapsed(activity.elevation_m, i, event.fraction);
+              var finishElevationGain = interpolatedElapsed(activity.elevation_gain_progress_m, i, event.fraction);
+              var finishElevationLoss = interpolatedElapsed(activity.elevation_loss_progress_m, i, event.fraction);
+              effort.elevation_gain_m = Math.max(0, finishElevationGain - startElevationGain);
+              effort.elevation_loss_m = Math.max(0, finishElevationLoss - startElevationLoss);
+              effort.grade_percent = Number.isFinite(startElevation) && Number.isFinite(finishElevation) &&
+                Number.isFinite(effort.distance_m) && effort.distance_m > 0
+                ? (finishElevation - startElevation) / effort.distance_m * 100 : null;
+            }
+            return effort;
           }
         }
       }
@@ -654,6 +751,43 @@ _PANEL_JS_TMPL = """
     function formatSegmentDistance(distanceM) {
       if (!Number.isFinite(distanceM)) return "—";
       return distanceM >= 1000 ? (distanceM / 1000).toFixed(2) + " km" : Math.round(distanceM) + " m";
+    }
+
+    function segmentPaceSeconds(effort) {
+      if (!Number.isFinite(effort.seconds) || !Number.isFinite(effort.distance_m) || effort.distance_m <= 0) return null;
+      return effort.seconds / (effort.distance_m / 1000);
+    }
+
+    function formatSegmentPace(effort) {
+      var paceSeconds = segmentPaceSeconds(effort);
+      if (!Number.isFinite(paceSeconds)) return "—";
+      var total = Math.max(0, Math.round(paceSeconds));
+      var prefix = effort.approximate || effort.distance_approximate ? "~" : "";
+      return prefix + Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0") + " /km";
+    }
+
+    function formatSegmentHeartRate(heartRate) {
+      return Number.isFinite(heartRate) ? Math.round(heartRate) + " bpm" : "—";
+    }
+
+    function formatSegmentElevation(elevation) {
+      return Number.isFinite(elevation) ? Math.round(elevation) + " m" : "—";
+    }
+
+    function formatSegmentGrade(grade) {
+      return Number.isFinite(grade) ? grade.toFixed(1) + "%" : "—";
+    }
+
+    function formatSegmentCadence(cadence) {
+      return Number.isFinite(cadence) ? Math.round(cadence) + " spm" : "—";
+    }
+
+    function formatSegmentPower(power) {
+      return Number.isFinite(power) ? Math.round(power) + " W" : "—";
+    }
+
+    function formatSegmentTemperature(temperature) {
+      return Number.isFinite(temperature) ? temperature.toFixed(1) + " °C" : "—";
     }
 
     function median(values) {
@@ -682,7 +816,8 @@ _PANEL_JS_TMPL = """
       var name = activity.label.replace(/^\\d{4}-\\d{2}-\\d{2}\\s+/, "");
       tooltip.innerHTML = '<strong>' + formatDate(activity.date_days) + ' · ' + escapeHtml(name) + '</strong>' +
         '<div class="tooltip-meta">' + escapeHtml(activity.type) + ' · ' + formatSegmentTime(effort.seconds) +
-        ' · ' + formatSegmentDistance(effort.distance_m) + '</div>';
+        ' · ' + formatSegmentPace(effort) + ' · ' + formatSegmentDistance(effort.distance_m) +
+        ' · ' + formatSegmentHeartRate(effort.average_hr_bpm) + '</div>';
       tooltip.hidden = false;
       var anchorBounds = anchor.getBoundingClientRect();
       var tooltipBounds = tooltip.getBoundingClientRect();
@@ -756,7 +891,8 @@ _PANEL_JS_TMPL = """
         var activity = result.record.activity;
         var name = activity.label.replace(/^\\d{4}-\\d{2}-\\d{2}\\s+/, "");
         var tooltip = formatDate(activity.date_days) + " · " + name + " · " + formatSegmentTime(result.effort.seconds) +
-          " · " + formatSegmentDistance(result.effort.distance_m);
+          " · " + formatSegmentPace(result.effort) + " · " + formatSegmentDistance(result.effort.distance_m) +
+          " · " + formatSegmentHeartRate(result.effort.average_hr_bpm);
         if (Number.isFinite(result.effort.seconds)) {
           var pointClass = result.effort.seconds === personalBest ? "chart-time-point chart-pb-point" : "chart-time-point";
           markup += '<circle class="' + pointClass + '" data-chart-record="' + index + '" cx="' + x(activity.date_days) +
@@ -807,7 +943,15 @@ _PANEL_JS_TMPL = """
       results.sort(function(a, b) {
         var av, bv;
         if (segmentSort.key === "time") { av = a.effort.seconds; bv = b.effort.seconds; }
+        else if (segmentSort.key === "pace") { av = segmentPaceSeconds(a.effort); bv = segmentPaceSeconds(b.effort); }
         else if (segmentSort.key === "distance") { av = a.effort.distance_m; bv = b.effort.distance_m; }
+        else if (segmentSort.key === "heart_rate") { av = a.effort.average_hr_bpm; bv = b.effort.average_hr_bpm; }
+        else if (segmentSort.key === "elevation_gain") { av = a.effort.elevation_gain_m; bv = b.effort.elevation_gain_m; }
+        else if (segmentSort.key === "elevation_loss") { av = a.effort.elevation_loss_m; bv = b.effort.elevation_loss_m; }
+        else if (segmentSort.key === "grade") { av = a.effort.grade_percent; bv = b.effort.grade_percent; }
+        else if (segmentSort.key === "cadence") { av = a.effort.average_cadence_spm; bv = b.effort.average_cadence_spm; }
+        else if (segmentSort.key === "power") { av = a.effort.average_power_w; bv = b.effort.average_power_w; }
+        else if (segmentSort.key === "temperature") { av = a.effort.average_temperature_c; bv = b.effort.average_temperature_c; }
         else if (segmentSort.key === "date") { av = a.record.activity.date_days; bv = b.record.activity.date_days; }
         else if (segmentSort.key === "type") { av = a.record.activity.type; bv = b.record.activity.type; }
         else { av = a.record.activity.label; bv = b.record.activity.label; }
@@ -818,7 +962,9 @@ _PANEL_JS_TMPL = """
       });
       panel.querySelector(".segment-results-count").textContent = results.length + " efforts";
       panel.querySelectorAll("th button").forEach(function(button) {
-        var labels = {date: "Date", activity: "Activity", type: "Type", time: "Time", distance: "Distance"};
+        var labels = {date: "Date", activity: "Activity", type: "Type", time: "Time", pace: "Pace",
+                      distance: "Distance", heart_rate: "Avg HR", elevation_gain: "D+", elevation_loss: "D−",
+                      grade: "Grade", cadence: "Cadence", power: "Power", temperature: "Temp"};
         button.textContent = labels[button.dataset.sort] + (button.dataset.sort === segmentSort.key
           ? (segmentSort.direction > 0 ? " ↑" : " ↓") : "");
       });
@@ -827,11 +973,27 @@ _PANEL_JS_TMPL = """
         var name = activity.label.replace(/^\\d{4}-\\d{2}-\\d{2}\\s+/, "");
         var time = formatSegmentTime(result.effort.seconds);
         if (result.effort.approximate && Number.isFinite(result.effort.seconds)) time = "~" + time;
+        var pace = formatSegmentPace(result.effort);
         var distance = formatSegmentDistance(result.effort.distance_m);
         if (result.effort.distance_approximate && Number.isFinite(result.effort.distance_m)) distance = "~" + distance;
+        var heartRate = formatSegmentHeartRate(result.effort.average_hr_bpm);
+        var elevationGain = formatSegmentElevation(result.effort.elevation_gain_m);
+        var elevationLoss = formatSegmentElevation(result.effort.elevation_loss_m);
+        var grade = formatSegmentGrade(result.effort.grade_percent);
+        var cadence = formatSegmentCadence(result.effort.average_cadence_spm);
+        var power = formatSegmentPower(result.effort.average_power_w);
+        var temperature = formatSegmentTemperature(result.effort.average_temperature_c);
         return '<tr data-segment-row="' + index + '"><td>' + formatDate(activity.date_days) + '</td>' +
-          '<td>' + escapeHtml(name) + '</td><td>' + escapeHtml(activity.type) + '</td><td>' + time + '</td><td>' + distance + '</td></tr>';
+          '<td>' + escapeHtml(name) + '</td><td>' + escapeHtml(activity.type) + '</td>' +
+          '<td data-segment-column="time">' + time + '</td><td data-segment-column="pace">' + pace + '</td>' +
+          '<td data-segment-column="distance">' + distance + '</td><td data-segment-column="heart_rate">' + heartRate + '</td>' +
+          '<td data-segment-column="elevation_gain">' + elevationGain + '</td>' +
+          '<td data-segment-column="elevation_loss">' + elevationLoss + '</td>' +
+          '<td data-segment-column="grade">' + grade + '</td><td data-segment-column="cadence">' + cadence + '</td>' +
+          '<td data-segment-column="power">' + power + '</td>' +
+          '<td data-segment-column="temperature">' + temperature + '</td></tr>';
       }).join("");
+      applySegmentColumns();
       panel.querySelectorAll("tbody tr").forEach(function(row) {
         var record = results[+row.dataset.segmentRow].record;
         row.__routeRecord = record;
@@ -915,7 +1077,7 @@ _PANEL_JS_TMPL = """
       var bounds = record.layer.getBounds();
       if (!bounds.isValid()) return;
       var fitZoom = mapObj.getBoundsZoom(bounds, false, L.point(80, 80));
-      var targetZoom = Math.max(mapObj.getMinZoom(), Math.min(routesMaxZoom, fitZoom - 1));
+      var targetZoom = Math.max(mapObj.getMinZoom(), Math.min(routesMaxZoom, fitZoom));
       mapObj.setView(bounds.getCenter(), targetZoom, {animate: true});
     }
 
@@ -1187,6 +1349,14 @@ _PANEL_JS_TMPL = """
       if (segmentDrawing) cancelSegmentDrawing(); else beginSegmentDrawing();
     });
     document.getElementById("segment-clear").addEventListener("click", clearSegment);
+    document.querySelectorAll("[data-segment-column-toggle]").forEach(function(input) {
+      input.addEventListener("change", function() {
+        segmentColumns[input.dataset.segmentColumnToggle] = input.checked;
+        saveSegmentColumns();
+        applySegmentColumns();
+      });
+    });
+    applySegmentColumns();
     document.querySelectorAll("#segment-results th button").forEach(function(button) {
       button.addEventListener("click", function() {
         var key = button.dataset.sort;

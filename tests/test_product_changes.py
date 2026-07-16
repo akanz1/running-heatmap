@@ -12,6 +12,8 @@ from heatmap import run
 from heatmap.layer_panel import LAYERS
 from heatmap.layer_panel import build_layer_panel_html
 from heatmap.parsers import _elapsed_seconds
+from heatmap.parsers import _parse_gpx
+from heatmap.parsers import _parse_tcx
 from heatmap.routes import save_routes
 from heatmap.stats_panel import StatsPanelData
 from heatmap.stats_panel import build_stats_panel_html
@@ -104,9 +106,9 @@ class ProductChangeTests(unittest.TestCase):
             moving_time_s=300,
             elevation_gain_m=20,
             points=[
-                [49.0, 8.0, 3.0, 140, 100.0, 0.0],
-                [49.0005, 8.0005, 3.0, 140, 102.0, 10.0],
-                [49.001, 8.001, 3.0, 140, 105.0, 20.0],
+                [49.0, 8.0, 3.0, 140, 100.0, 0.0, 160, 250, 20],
+                [49.0005, 8.0005, 3.0, 140, 102.0, 10.0, 170, 300, 21],
+                [49.001, 8.001, 3.0, 140, 105.0, 20.0, 180, 350, 22],
             ],
         )
 
@@ -126,6 +128,37 @@ class ProductChangeTests(unittest.TestCase):
         self.assertEqual(len(payload["activities"][0]["progress_m"]), 2)
         self.assertEqual(payload["activities"][0]["progress_m"][0], 0.0)
         self.assertGreater(payload["activities"][0]["progress_m"][1], 100)
+        self.assertEqual(payload["activities"][0]["heart_rate_bpm_seconds"], [0.0, 2800.0])
+        self.assertEqual(payload["activities"][0]["heart_rate_duration_s"], [0.0, 20.0])
+        self.assertEqual(payload["activities"][0]["cadence_spm_seconds"], [0.0, 3400.0])
+        self.assertEqual(payload["activities"][0]["power_watt_seconds"], [0.0, 6000.0])
+        self.assertEqual(payload["activities"][0]["temperature_c_seconds"], [0.0, 420.0])
+        self.assertEqual(payload["activities"][0]["elevation_m"], [101.0, 103.5])
+        self.assertEqual(payload["activities"][0]["elevation_gain_progress_m"], [0.0, 2.5])
+        self.assertEqual(payload["activities"][0]["elevation_loss_progress_m"], [0.0, 0.0])
+
+    def test_xml_parsers_keep_extended_metrics(self) -> None:
+        gpx = """<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"
+        xmlns:x="http://www.garmin.com/xmlschemas/TrackPointExtension/v1"><trk><trkseg>
+        <trkpt lat="49" lon="8"><ele>100</ele><time>2026-01-01T00:00:00Z</time><extensions>
+        <x:TrackPointExtension><x:hr>140</x:hr><x:cad>85</x:cad><x:power>300</x:power>
+        <x:atemp>20</x:atemp></x:TrackPointExtension></extensions></trkpt></trkseg></trk></gpx>"""
+        tcx = """<TrainingCenterDatabase><Activities><Activity><Lap><Track><Trackpoint>
+        <Time>2026-01-01T00:00:00Z</Time><Position><LatitudeDegrees>49</LatitudeDegrees>
+        <LongitudeDegrees>8</LongitudeDegrees></Position><AltitudeMeters>100</AltitudeMeters>
+        <HeartRateBpm><Value>140</Value></HeartRateBpm><Cadence>85</Cadence>
+        <Extensions><TPX><Watts>300</Watts><Temperature>20</Temperature></TPX></Extensions>
+        </Trackpoint></Track></Lap></Activity></Activities></TrainingCenterDatabase>"""
+        with tempfile.TemporaryDirectory() as tmp:
+            gpx_path = Path(tmp) / "track.gpx"
+            tcx_path = Path(tmp) / "track.tcx"
+            gpx_path.write_text(gpx)
+            tcx_path.write_text(tcx)
+            gpx_point = _parse_gpx(gpx_path)[0]
+            tcx_point = _parse_tcx(tcx_path)[0]
+
+        self.assertEqual(gpx_point[3:], [140.0, 100.0, 0.0, 170.0, 300.0, 20.0])
+        self.assertEqual(tcx_point[3:], [140.0, 100.0, 0.0, 170.0, 300.0, 20.0])
 
     def test_elapsed_seconds_are_relative_and_keep_missing_samples(self) -> None:
         times = [
@@ -145,6 +178,10 @@ class ProductChangeTests(unittest.TestCase):
 
         self.assertIn('name="map-mode" value="heatmap"', html)
         self.assertIn('name="map-mode" value="routes" checked', html)
+        self.assertLess(
+            html.index('name="map-mode" value="routes"'),
+            html.index('name="map-mode" value="heatmap"'),
+        )
         self.assertIn('<div id="view-updated-at">Updated —</div>', html)
         self.assertIn('"all": "2026-07-11T10:00:00+00:00"', html)
         self.assertIn("routesUpdatedAt = payload.generated_at", html)
@@ -176,12 +213,21 @@ class ProductChangeTests(unittest.TestCase):
         self.assertIn("localStorage.setItem", html)
         self.assertIn('data-sort="time"', html)
         self.assertIn('data-sort="distance"', html)
+        self.assertIn('data-sort="pace"', html)
+        self.assertIn('data-sort="heart_rate"', html)
+        self.assertIn("function formatSegmentPace", html)
+        self.assertIn("average_hr_bpm", html)
+        for column in ("elevation_gain", "elevation_loss", "grade", "cadence", "power", "temperature"):
+            self.assertIn(f'data-sort="{column}"', html)
+            self.assertIn(f'data-segment-column-toggle="{column}"', html)
+        self.assertIn("running-heatmap-segment-columns", html)
         self.assertIn('id="segment-chart"', html)
         self.assertIn("function renderSegmentChart", html)
         self.assertIn("progress_m", html)
         self.assertIn("function focusRoute", html)
         self.assertIn("getBoundsZoom", html)
-        self.assertIn("fitZoom - 1", html)
+        self.assertIn("Math.min(routesMaxZoom, fitZoom)", html)
+        self.assertNotIn("fitZoom - 1", html)
         self.assertIn("autoPan: false", html)
         self.assertIn('id="segment-chart-tooltip"', html)
         self.assertIn("function setEffortHover", html)
