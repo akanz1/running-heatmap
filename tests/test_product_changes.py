@@ -1,26 +1,26 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 
 from heatmap import run
-from heatmap.layer_panel import LAYERS
+from heatmap.config import Config
 from heatmap.layer_panel import build_layer_panel_html
+from heatmap.layer_panel import LAYERS
 from heatmap.parsers import _elapsed_seconds
 from heatmap.parsers import _parse_gpx
 from heatmap.parsers import _parse_tcx
 from heatmap.routes import save_routes
-from heatmap.stats_panel import StatsPanelData
 from heatmap.stats_panel import build_stats_panel_html
-from heatmap.config import Config
+from heatmap.stats_panel import StatsPanelData
 from heatmap.tiles import build_pyramid
-from heatmap.tracks import Track
 from heatmap.tracks import load_tracks
+from heatmap.tracks import Track
 from main import config
 
 
@@ -191,10 +191,10 @@ class ProductChangeTests(unittest.TestCase):
         self.assertIn('name="route-type" value="Trail Run" checked', html)
         self.assertIn('name="route-type" value="Hike" checked', html)
         self.assertIn('<div class="group-title">Metrics</div>', html)
-        self.assertIn('<span>Pace</span>', html)
-        self.assertIn('<span>Heart rate</span>', html)
-        self.assertIn('<span>Uphill / downhill</span>', html)
-        self.assertNotIn('<span>Average</span>', html)
+        self.assertIn("<span>Pace</span>", html)
+        self.assertIn("<span>Heart rate</span>", html)
+        self.assertIn("<span>Uphill / downhill</span>", html)
+        self.assertNotIn("<span>Average</span>", html)
         self.assertIn('fetch("routes.json")', html)
         self.assertIn("L.canvas({padding: 0.5, tolerance: 6})", html)
         self.assertIn("zoom <= 3 ? 8.0", html)
@@ -210,6 +210,11 @@ class ProductChangeTests(unittest.TestCase):
         self.assertIn('id="segment-results"', html)
         self.assertIn("function intersectionFraction", html)
         self.assertIn("function segmentEffort", html)
+        self.assertIn("function segmentEffortPoints", html)
+        self.assertIn("start_index: startIndex", html)
+        self.assertIn("finish_fraction: event.fraction", html)
+        self.assertIn("record === selectedRoute && record.segmentEffort", html)
+        self.assertIn('color: "#fbbf24"', html)
         self.assertIn("localStorage.setItem", html)
         self.assertIn('data-sort="time"', html)
         self.assertIn('data-sort="distance"', html)

@@ -594,6 +594,7 @@ _PANEL_JS_TMPL = """
       document.getElementById("segment-clear").disabled = true;
       setSegmentStatus("Draw start and finish gates");
       updateSegmentResults();
+      if (hoveredRoute || selectedRoute) showRouteHighlight(hoveredRoute || selectedRoute);
     }
 
     function intersectionFraction(a, b, c, d) {
@@ -676,19 +677,26 @@ _PANEL_JS_TMPL = """
         activity.elevation_gain_progress_m.length === activity.points.length &&
         activity.elevation_loss_progress_m.length === activity.points.length;
       var started = false, startElapsed = null, startDistance = null, startProgress = null;
+      var startIndex = null, startFraction = null;
       var startElevation = null, startElevationGain = null, startElevationLoss = null;
       for (var i = 1; i < activity.points.length; i++) {
         var events = [];
-        var startFraction = intersectionFraction(activity.points[i - 1], activity.points[i], segment.start[0], segment.start[1]);
-        var finishFraction = intersectionFraction(activity.points[i - 1], activity.points[i], segment.finish[0], segment.finish[1]);
-        if (startFraction != null) events.push({kind: "start", fraction: startFraction});
-        if (finishFraction != null) events.push({kind: "finish", fraction: finishFraction});
+        var startCrossingFraction = intersectionFraction(
+          activity.points[i - 1], activity.points[i], segment.start[0], segment.start[1]
+        );
+        var finishCrossingFraction = intersectionFraction(
+          activity.points[i - 1], activity.points[i], segment.finish[0], segment.finish[1]
+        );
+        if (startCrossingFraction != null) events.push({kind: "start", fraction: startCrossingFraction});
+        if (finishCrossingFraction != null) events.push({kind: "finish", fraction: finishCrossingFraction});
         events.sort(function(a, b) { return a.fraction - b.fraction; });
         for (var j = 0; j < events.length; j++) {
           var event = events[j];
           var progress = i - 1 + event.fraction;
           if (!started && event.kind === "start") {
             started = true;
+            startIndex = i;
+            startFraction = event.fraction;
             startProgress = progress;
             startElapsed = interpolatedElapsed(elapsed, i, event.fraction);
             startDistance = interpolatedElapsed(pathDistances, i, event.fraction);
@@ -708,7 +716,11 @@ _PANEL_JS_TMPL = """
               seconds: startElapsed == null || finishElapsed == null ? null : finishElapsed - startElapsed,
               approximate: activity.__segmentTimeApproximate,
               distance_m: startDistance == null || finishDistance == null ? null : finishDistance - startDistance,
-              distance_approximate: activity.__segmentDistanceApproximate
+              distance_approximate: activity.__segmentDistanceApproximate,
+              start_index: startIndex,
+              start_fraction: startFraction,
+              finish_index: i,
+              finish_fraction: event.fraction
             };
             averageMetrics.forEach(function(metric) {
               var finishValue = interpolatedElapsed(metric.values, i, event.fraction);
@@ -734,9 +746,31 @@ _PANEL_JS_TMPL = """
       return null;
     }
 
+    function interpolatedRoutePoint(points, index, fraction) {
+      var start = points[index - 1], finish = points[index];
+      return [
+        start[0] + (finish[0] - start[0]) * fraction,
+        start[1] + (finish[1] - start[1]) * fraction
+      ];
+    }
+
+    function segmentEffortPoints(activity, effort) {
+      if (!effort || effort.start_index == null || effort.finish_index == null) return [];
+      var points = [interpolatedRoutePoint(activity.points, effort.start_index, effort.start_fraction)];
+      for (var i = effort.start_index; i < effort.finish_index; i++) {
+        var point = activity.points[i], previous = points[points.length - 1];
+        if (point[0] !== previous[0] || point[1] !== previous[1]) points.push(point);
+      }
+      var finish = interpolatedRoutePoint(activity.points, effort.finish_index, effort.finish_fraction);
+      var previous = points[points.length - 1];
+      if (finish[0] !== previous[0] || finish[1] !== previous[1]) points.push(finish);
+      return points;
+    }
+
     function recomputeSegmentEfforts() {
       routeRecords.forEach(function(record) { record.segmentEffort = segmentEffort(record.activity); });
       updateSegmentResults();
+      if (hoveredRoute || selectedRoute) showRouteHighlight(hoveredRoute || selectedRoute);
     }
 
     function formatSegmentTime(seconds) {
@@ -1057,6 +1091,20 @@ _PANEL_JS_TMPL = """
         color: style.color, weight: style.weight + 2.5, opacity: 1,
         lineCap: "round", lineJoin: "round", interactive: false
       }).addTo(highlightGroup);
+
+      if (record === selectedRoute && record.segmentEffort) {
+        var effortPoints = segmentEffortPoints(activity, record.segmentEffort);
+        if (effortPoints.length >= 2) {
+          L.polyline(effortPoints, {
+            color: "#fff", weight: style.weight + 8, opacity: 0.90,
+            lineCap: "round", lineJoin: "round", interactive: false
+          }).addTo(highlightGroup);
+          L.polyline(effortPoints, {
+            color: "#fbbf24", weight: style.weight + 4, opacity: 1,
+            lineCap: "round", lineJoin: "round", interactive: false
+          }).addTo(highlightGroup);
+        }
+      }
 
       var markerStepKm = mapObj.getZoom() >= 13 ? 1 : mapObj.getZoom() >= 10 ? 5 : 0;
       if (markerStepKm) {
